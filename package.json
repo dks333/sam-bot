@@ -1,0 +1,31 @@
+{
+  "name": "sam-bot",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm --filter @sam-bot/bridge build",
+    "sam-bot": "pnpm --filter @sam-bot/bridge sam-bot",
+    "codex-slack": "pnpm --filter @sam-bot/bridge codex-slack",
+    "dev": "pnpm --filter @sam-bot/bridge dev",
+    "format": "oxfmt --check .",
+    "format:write": "oxfmt .",
+    "lint": "oxlint . --deny-warnings && node scripts/check-no-zod.mjs",
+    "start": "pnpm --filter @sam-bot/bridge start",
+    "test": "pnpm --recursive test",
+    "type": "pnpm --recursive type"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "oxfmt": "^0.60.0",
+    "oxlint": "^1.75.0",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "packageManager": "pnpm@11.9.0"
+}

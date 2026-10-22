@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "slack": {
+    "allowedTeamId": "T0123456789",
+    "allowedUserId": "U0123456789",
+    "allowedChannelIds": ["C0123456789"]
+  },
+  "workspaces": {
+    "default": "/absolute/path/to/repository"
+  },
+  "runtime": {
+    "agentProvider": "codex",
+    "defaultWorkspaceAlias": "default",
+    "maxSlackResponseChars": 3500,
+    "logLevel": "info"
+  },
+  "codex": {
+    "home": "/Users/you/.codex"
+  },
+  "claude": {}
+}
