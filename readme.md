@@ -1,8 +1,23 @@
 # Sam Bot
 
-Your coding agent in Slack.
+Your coding setup, one Slack message away.
 
-Connect Slack to Codex or Claude Code on your computer, using your existing account and project settings.
+Send work to Codex or Claude Code running on your computer. Sam Bot uses your local checkout and agent configuration, then brings replies, questions, and supported approvals back to Slack.
+
+## Why Sam Bot?
+
+You already put time into your coding setup. Use it from Slack, including on your phone.
+
+| Why use it?             | What you get                                                             |
+| ----------------------- | ------------------------------------------------------------------------ |
+| Your working checkout   | Your current branch, uncommitted files, and installed dependencies.      |
+| Your agent setup        | Installed Codex or Claude Code, with its local sign-in and settings.     |
+| No Sam Bot platform fee | Bring your account and machine. Provider charges and limits still apply. |
+| MIT source              | Inspect, change, and run the bridge yourself.                            |
+
+> "Reproduce this bug on my current branch and run the tests."
+
+Built for one person operating their own bot. Your computer must stay online. Messages pass through Slack; model requests still go to your agent's provider.
 
 ## Set it up with your agent
 
