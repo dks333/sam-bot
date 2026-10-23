@@ -6,14 +6,17 @@ Send work to Codex or Claude Code running on your computer. Sam Bot uses your lo
 
 ## Why Sam Bot?
 
-You already put time into your coding setup. Use it from Slack, including on your phone.
+Your local agent already has skills, plugins, and tools you've signed in to. Sam Bot lets you use that setup from Slack, including on your phone.
 
-| Why use it?             | What you get                                                             |
-| ----------------------- | ------------------------------------------------------------------------ |
-| Your working checkout   | Your current branch, uncommitted files, and installed dependencies.      |
-| Your agent setup        | Installed Codex or Claude Code, with its local sign-in and settings.     |
-| No Sam Bot platform fee | Bring your account and machine. Provider charges and limits still apply. |
-| MIT source              | Inspect, change, and run the bridge yourself.                            |
+| What you keep                  | Sam Bot on your computer                                          | Typical hosted agent in Slack                                         |
+| ------------------------------ | ----------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Skills and plugins             | Uses what your native agent already loads locally.                | Repository skills and workspace/platform installs.                    |
+| Authenticated MCP connections  | Reuses supported saved sign-ins in your native profile.           | Connections and credentials configured for that workspace.            |
+| Working files                  | Your current branch, uncommitted changes, and local files.        | A separate clone or uploaded snapshot.                                |
+| Tools and services             | Installed CLIs, dependencies, and reachable local services.       | Tools and services provisioned in that workspace.                     |
+| Availability and parallel work | Your host stays online; tasks use your configured local checkout. | Managed execution, with isolated parallel workspaces where supported. |
+
+Tool access follows your native agent's permissions and credential support. Sign-in steps stay local. This compares the usual hosted setup; local and self-hosted options also exist. [Comparison details and sources](docs/local-vs-cloud.md).
 
 > "Reproduce this bug on my current branch and run the tests."
 
