@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 
 import type { SlackMessageStatus, SlackResponder } from "../slack/responder.js";
+import { redactSensitiveText } from "../slack/redact-sensitive.js";
 
 import {
   NativeConversationStore,
@@ -64,6 +65,7 @@ export class NativeFinalDelivery {
   readonly #transport: NativeFinalDeliveryTransport;
   readonly #logger: Pick<Logger, "info" | "warn">;
   readonly #assertOwned: () => void;
+  readonly #redact: (text: string) => string;
   readonly #inflight = new Map<string, Promise<void>>();
 
   constructor(options: {
@@ -71,11 +73,13 @@ export class NativeFinalDelivery {
     transport: NativeFinalDeliveryTransport;
     logger: Pick<Logger, "info" | "warn">;
     assertOwned: () => void;
+    redactSensitiveText?: (text: string) => string;
   }) {
     this.#store = options.store;
     this.#transport = options.transport;
     this.#logger = options.logger;
     this.#assertOwned = options.assertOwned;
+    this.#redact = options.redactSensitiveText ?? redactSensitiveText;
   }
 
   deliver(eventId: string): Promise<void> {
@@ -95,7 +99,11 @@ export class NativeFinalDelivery {
       delivery.rootEventId !== undefined
     )
       return;
-    const parts = this.#store.prepareFinalParts(eventId, splitNativeResponse(delivery.finalText));
+    const parts = this.#store.prepareFinalParts(
+      eventId,
+      splitNativeResponse(this.#redact(delivery.finalText)),
+      this.#redact,
+    );
     for (const initial of parts) {
       this.#assertOwned();
       if (initial.state === "confirmed") continue;

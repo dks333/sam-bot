@@ -1,5 +1,7 @@
 import { ArkErrors } from "arktype";
 
+import { redactSensitiveText } from "../slack/redact-sensitive.js";
+
 export interface ArkParser<Output> {
   (input: unknown): ArkErrors | Output;
 }
@@ -26,18 +28,8 @@ export type ValidationResult<Output> =
       value: Output;
     };
 
-const secretPatterns = [
-  /\bxox[baprs]-[A-Za-z0-9-]+\b/gu,
-  /\bsk-[A-Za-z0-9_-]+\b/gu,
-  /\bBearer\s+[A-Za-z0-9._~+/-]+=*\b/giu,
-];
-
 export function redactValidationSummary(summary: string): string {
-  let redacted = summary;
-  for (const pattern of secretPatterns) {
-    redacted = redacted.replace(pattern, "[REDACTED]");
-  }
-  return redacted;
+  return redactSensitiveText(summary);
 }
 
 export function parseArk<Output>(

@@ -22,6 +22,7 @@ interface NativeInputIdentity {
 
 interface NativeInputRelayOptions {
   agentName?: string;
+  redactSensitiveText?: (text: string) => string;
   postApproval: (input: {
     approvalId: string;
     expiresAt: string;
@@ -80,13 +81,28 @@ function jsonText(value: unknown): string {
   return text;
 }
 
-function preview(value: string): string {
-  const text = redactSensitiveText(value);
+function containsHiddenCharacters(text: string): boolean {
+  if (/[\p{Cf}\p{Zl}\p{Zp}]/u.test(text)) return true;
+  return [...text].some((character) => {
+    const code = character.charCodeAt(0);
+    return (code < 32 && code !== 10) || (code >= 127 && code <= 159);
+  });
+}
+
+function preview(value: string, redact: (text: string) => string): string {
   requireInput(
-    text.length <= maximumPreviewCharacters,
-    "Complete this Codex request locally because its full scope cannot fit in a Slack prompt.",
+    value.length <= maximumPreviewCharacters,
+    "Complete this native request locally because its full scope cannot fit in a Slack prompt.",
   );
-  return text;
+  requireInput(
+    !containsHiddenCharacters(value),
+    "Complete this native request locally because its scope contains hidden display characters.",
+  );
+  requireInput(
+    redact(value) === value,
+    "Complete this native request locally because its full scope contains sensitive values that cannot be shown in Slack.",
+  );
+  return value;
 }
 
 function sameIdentity(binding: NativeInputBinding, identity: NativeInputIdentity): boolean {
@@ -252,7 +268,11 @@ function validPermissions(value: Record<string, unknown>): boolean {
   return true;
 }
 
-function prepareInput(request: AppServerRequest, agentName: string): PreparedInput {
+function prepareInput(
+  request: AppServerRequest,
+  agentName: string,
+  redact: (text: string) => string,
+): PreparedInput {
   if (!isRecord(request.params))
     throw new Error(`${agentName} returned invalid request parameters.`);
   const params = request.params;
@@ -288,23 +308,27 @@ function prepareInput(request: AppServerRequest, agentName: string): PreparedInp
     );
     return {
       kind: "approval",
-      summary: preview(lines.join("\n\n")),
+      summary: preview(lines.join("\n\n"), redact),
       accept: { decision: "accept" },
       ...decisions,
     };
   }
   if (request.method === "item/fileChange/requestApproval") {
     const lines = [`Approve this ${agentName} file change once?`];
-    const scope = params.changes ?? params.paths ?? params.grantRoot;
+    const scopes = [
+      ["Changes", params.changes],
+      ["Paths", params.paths],
+      ["Write scope", params.grantRoot],
+    ].filter(([, value]) => value != null);
     requireInput(
-      scope != null,
+      scopes.length > 0,
       `Complete this file approval locally; ${agentName} did not provide its changed paths or write scope.`,
     );
-    lines.push(jsonText(scope));
+    for (const [label, scope] of scopes) lines.push(`${label}: ${jsonText(scope)}`);
     if (reason.length > 0) lines.push(reason);
     return {
       kind: "approval",
-      summary: preview(lines.join("\n\n")),
+      summary: preview(lines.join("\n\n"), redact),
       accept: { decision: "accept" },
       ...decisions,
     };
@@ -334,6 +358,7 @@ function prepareInput(request: AppServerRequest, agentName: string): PreparedInp
         ]
           .filter(Boolean)
           .join("\n\n"),
+        redact,
       ),
       accept: { permissions: copy, scope: "turn" },
       decline: cancelled,
@@ -382,7 +407,7 @@ function prepareInput(request: AppServerRequest, agentName: string): PreparedInp
     });
     return {
       kind: "answer",
-      summary: preview(descriptions.join("\n\n")),
+      summary: preview(descriptions.join("\n\n"), redact),
       decline: { answers: {} },
       cancel: { answers: {} },
       answer: (text) => questionAnswer(questions, text),
@@ -422,6 +447,7 @@ function prepareInput(request: AppServerRequest, agentName: string): PreparedInp
           schemaText,
           "Reply with a JSON object matching these fields.",
         ].join("\n\n"),
+        redact,
       ),
       decline: { action: "decline", content: null, _meta: null },
       cancel: cancelled,
@@ -443,10 +469,12 @@ function prepareInput(request: AppServerRequest, agentName: string): PreparedInp
 export class NativeInputRelay {
   readonly #options: NativeInputRelayOptions;
   readonly #pending = new Map<string, PendingInput>();
+  readonly #redact: (text: string) => string;
   #closed = false;
 
   constructor(options: NativeInputRelayOptions) {
     this.#options = options;
+    this.#redact = options.redactSensitiveText ?? redactSensitiveText;
   }
 
   async request(request: AppServerRequest, binding: NativeInputBinding): Promise<unknown> {
@@ -482,7 +510,7 @@ export class NativeInputRelay {
         );
         return existing.promise;
       }
-      const prepared = prepareInput(request, this.#options.agentName ?? "Codex");
+      const prepared = prepareInput(request, this.#options.agentName ?? "Codex", this.#redact);
       if (prepared.kind === "local") {
         await this.#postInfo(binding, prepared.summary);
         return prepared.cancel;
@@ -545,11 +573,10 @@ export class NativeInputRelay {
         error instanceof Error
           ? error.message
           : `The native ${this.#options.agentName ?? "Codex"} input could not be relayed.`;
-      await this.#postInfo(
-        binding,
-        redactSensitiveText(message).slice(0, maximumPreviewCharacters),
-      ).catch(() => {});
-      throw new Error(redactSensitiveText(message));
+      await this.#postInfo(binding, this.#redact(message).slice(0, maximumPreviewCharacters)).catch(
+        () => {},
+      );
+      throw new Error(this.#redact(message));
     }
   }
 
@@ -584,7 +611,7 @@ export class NativeInputRelay {
       return false;
     try {
       requireInput(
-        text.length <= maximumInputCharacters && redactSensitiveText(text) === text,
+        text.length <= maximumInputCharacters && this.#redact(text) === text,
         "Do not submit secrets through Slack.",
       );
       const response = entry.prepared.answer(text);
@@ -611,15 +638,11 @@ export class NativeInputRelay {
     if (entries.length !== 1) return "not-answer";
     const entry = entries[0];
     if (entry?.prepared.answer === undefined) return "not-answer";
-    if (
-      input.text.length > maximumInputCharacters ||
-      redactSensitiveText(input.text) !== input.text
-    )
+    if (input.text.length > maximumInputCharacters || this.#redact(input.text) !== input.text)
       return "invalid";
     try {
       requireInput(
-        input.text.length <= maximumInputCharacters &&
-          redactSensitiveText(input.text) === input.text,
+        input.text.length <= maximumInputCharacters && this.#redact(input.text) === input.text,
         "Do not submit secrets through Slack.",
       );
       const response = entry.prepared.answer(input.text);

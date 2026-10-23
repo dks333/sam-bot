@@ -710,13 +710,17 @@ export class NativeConversationStore {
       .immediate();
   }
 
-  prepareFinalParts(eventId: string, texts: readonly string[]): NativeFinalPart[] {
+  prepareFinalParts(
+    eventId: string,
+    texts: readonly string[],
+    transform: (text: string) => string = (text) => text,
+  ): NativeFinalPart[] {
     return this.#database
       .transaction(() => {
         const current = this.#required(eventId);
         if (current.finalText === undefined || current.rootEventId !== undefined)
           throw new Error("Only a primary persisted native final can prepare delivery");
-        let expected = current.finalText;
+        let expected = transform(current.finalText);
         if (expected.length === 0) expected = "Codex completed without a final response.";
         if (
           texts.length === 0 ||

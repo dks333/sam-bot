@@ -583,17 +583,19 @@ describe("native Slack input relay", () => {
     expect(harness.postApproval).not.toHaveBeenCalled();
   });
 
-  it("redacts secrets in approval previews", async () => {
+  it("requires local approval when redaction would conceal execution scope", async () => {
     const harness = fixture();
-    const result = harness.relay.request(
-      request(undefined, { command: "synthetic-command --token=synthetic-private-value" }),
-      binding,
-    );
-    expect(harness.postApproval.mock.calls[0]?.[0].summary).not.toContain(
+    await expect(
+      harness.relay.request(
+        request(undefined, { command: "synthetic-command --token=synthetic-private-value" }),
+        binding,
+      ),
+    ).rejects.toThrow("sensitive values");
+    expect(harness.postApproval).not.toHaveBeenCalled();
+    expect(harness.relay.pendingCount(binding)).toBe(0);
+    expect(harness.postInfo.mock.calls.map(([input]) => input.text).join("\n")).not.toContain(
       "synthetic-private-value",
     );
-    harness.relay.close();
-    expect(await result).toEqual({ decision: "cancel" });
   });
 
   it("does not retain an actionable approval after delivery fails", async () => {

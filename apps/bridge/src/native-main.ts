@@ -23,6 +23,7 @@ import { createSlackApp } from "./slack/app.js";
 import { AgentSessionStatusAdapter } from "./slack/agent-session-status.js";
 import { AgentStatusCoordinator } from "./slack/agent-status-coordinator.js";
 import { nativeSlackTransport } from "./slack/native-transport.js";
+import { redactSensitiveText } from "./slack/redact-sensitive.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -30,6 +31,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export async function startNativeSlack(product: ReturnType<typeof loadProduct>): Promise<void> {
   const config = product.bridge;
+  const redactText = (text: string): string =>
+    redactSensitiveText(text, [config.botToken, config.appToken]);
   const agentProvider = product.config.runtime.agentProvider ?? "codex";
   const agentName = agentProvider === "claude" ? "Claude Code" : "Codex";
   let executablePath = product.config.codex.executablePath;
@@ -198,7 +201,8 @@ export async function startNativeSlack(product: ReturnType<typeof loadProduct>):
     store,
     cwd,
     logger,
-    transport: nativeSlackTransport(app.client),
+    transport: nativeSlackTransport(app.client, redactText),
+    redactSensitiveText: redactText,
     onActivity: (snapshot) => status.observe(snapshot),
     assertOwned: () => owner.assertOwned(),
     onTransportClosed() {

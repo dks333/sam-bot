@@ -27,6 +27,7 @@ import {
   WebApiSlackResponder,
 } from "./responder.js";
 import { loadSlackThreadContext } from "./thread-context.js";
+import { redactSensitiveText } from "./redact-sensitive.js";
 import {
   SlackConnectionLifecycle,
   slackRequestFetch,
@@ -394,6 +395,8 @@ function observeAuthorizedReceipt(
 }
 
 export function createSlackApp(config: BridgeConfig, dependencies: SlackAppDependencies): App {
+  const redactText = (text: string): string =>
+    redactSensitiveText(text, [config.botToken, config.appToken]);
   const sdkLogger: SlackSdkLogger = {
     debug: () => {},
     info: () => {},
@@ -536,7 +539,7 @@ export function createSlackApp(config: BridgeConfig, dependencies: SlackAppDepen
       eventId: bodyMetadata.event_id,
       receivedAt: processedAt,
     });
-    const responder = new WebApiSlackResponder(client, config.maxSlackResponseChars);
+    const responder = new WebApiSlackResponder(client, config.maxSlackResponseChars, redactText);
     const messageReference = {
       channelId: identity.channelId,
       messageTs: content.ts,
@@ -653,7 +656,7 @@ export function createSlackApp(config: BridgeConfig, dependencies: SlackAppDepen
       eventId: bodyMetadata.event_id,
       receivedAt: processedAt,
     });
-    const responder = new WebApiSlackResponder(client, config.maxSlackResponseChars);
+    const responder = new WebApiSlackResponder(client, config.maxSlackResponseChars, redactText);
     const messageReference = {
       channelId: identity.channelId,
       messageTs: message.ts,
@@ -755,7 +758,7 @@ export function createSlackApp(config: BridgeConfig, dependencies: SlackAppDepen
         return;
       }
 
-      const responder = new WebApiSlackResponder(client, config.maxSlackResponseChars);
+      const responder = new WebApiSlackResponder(client, config.maxSlackResponseChars, redactText);
       await dependencies.service.handleApproval({
         approvalId: actionValue,
         approved,
@@ -813,7 +816,7 @@ export function createSlackApp(config: BridgeConfig, dependencies: SlackAppDepen
         channelId: identity.channelId,
         threadTs,
       },
-      responder: new WebApiSlackResponder(client, config.maxSlackResponseChars),
+      responder: new WebApiSlackResponder(client, config.maxSlackResponseChars, redactText),
     });
   });
 
@@ -880,7 +883,7 @@ export function createSlackApp(config: BridgeConfig, dependencies: SlackAppDepen
       directMessage,
       identity,
       replyContext,
-      responder: new WebApiSlackResponder(client, config.maxSlackResponseChars),
+      responder: new WebApiSlackResponder(client, config.maxSlackResponseChars, redactText),
     });
   });
 

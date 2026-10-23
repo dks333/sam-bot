@@ -69,8 +69,16 @@ function truncate(text: string, maxCharacters: number): string {
   return `${text.slice(0, maxCharacters - suffix.length)}${suffix}`;
 }
 
-function safeSlackText(text: string): string {
-  return redactLocalPaths(redactSensitiveText(text));
+function containsHiddenCharacters(text: string): boolean {
+  if (/[\p{Cf}\p{Zl}\p{Zp}]/u.test(text)) return true;
+  return [...text].some((character) => {
+    const code = character.charCodeAt(0);
+    return (code < 32 && code !== 10) || (code >= 127 && code <= 159);
+  });
+}
+
+function safeSlackText(text: string, redact: (text: string) => string): string {
+  return redactLocalPaths(redact(text));
 }
 
 function transformMarkdownText(text: string): string {
@@ -107,10 +115,16 @@ export function slackMrkdwn(markdown: string): string {
 export class WebApiSlackResponder implements SlackResponder {
   readonly #client: WebClient;
   readonly #maxCharacters: number;
+  readonly #redact: (text: string) => string;
 
-  constructor(client: WebClient, maxCharacters: number) {
+  constructor(
+    client: WebClient,
+    maxCharacters: number,
+    redact: (text: string) => string = redactSensitiveText,
+  ) {
     this.#client = client;
     this.#maxCharacters = maxCharacters;
+    this.#redact = redact;
   }
 
   async postApproval(
@@ -122,13 +136,22 @@ export class WebApiSlackResponder implements SlackResponder {
       userId: string;
     },
   ): Promise<void> {
-    const safeSummary = safeSlackText(input.summary);
+    if (
+      input.summary.length > 2_700 ||
+      this.#redact(input.summary) !== input.summary ||
+      containsHiddenCharacters(input.summary)
+    ) {
+      throw new Error(
+        "Complete this approval locally; its full scope cannot be shown safely in Slack.",
+      );
+    }
     const blocks: KnownBlock[] = [
       {
         type: "section",
         text: {
-          type: "mrkdwn",
-          text: `Approval required\n\n${safeSummary}\n\nExpires at ${input.expiresAt}.`,
+          type: "plain_text",
+          emoji: false,
+          text: `Approval required\n\n${input.summary}\n\nExpires at ${input.expiresAt}.`,
         },
       },
       {
@@ -161,7 +184,8 @@ export class WebApiSlackResponder implements SlackResponder {
     await this.#client.chat.postEphemeral({
       blocks,
       channel: context.channelId,
-      text: `Approval required: ${safeSummary}`,
+      text: "Approval required. Review the complete action in the private approval card.",
+      parse: "none",
       thread_ts: context.threadTs,
       user: input.userId,
     });
@@ -170,7 +194,7 @@ export class WebApiSlackResponder implements SlackResponder {
   async postError(context: SlackReplyContext, message: string): Promise<void> {
     await this.#client.chat.postMessage({
       channel: context.channelId,
-      text: truncate(safeSlackText(`❌ ${message}`), this.#maxCharacters),
+      text: truncate(safeSlackText(`❌ ${message}`, this.#redact), this.#maxCharacters),
       thread_ts: context.threadTs,
     });
   }
@@ -178,7 +202,7 @@ export class WebApiSlackResponder implements SlackResponder {
   async postInfo(context: SlackReplyContext, message: string): Promise<void> {
     await this.#client.chat.postMessage({
       channel: context.channelId,
-      text: truncate(safeSlackText(message), this.#maxCharacters),
+      text: truncate(safeSlackText(message, this.#redact), this.#maxCharacters),
       thread_ts: context.threadTs,
     });
   }
@@ -190,7 +214,7 @@ export class WebApiSlackResponder implements SlackResponder {
   ): Promise<void> {
     await this.#client.chat.postEphemeral({
       channel: context.channelId,
-      text: truncate(safeSlackText(`❌ ${message}`), this.#maxCharacters),
+      text: truncate(safeSlackText(`❌ ${message}`, this.#redact), this.#maxCharacters),
       thread_ts: context.threadTs,
       user: userId,
     });
@@ -203,7 +227,7 @@ export class WebApiSlackResponder implements SlackResponder {
   ): Promise<void> {
     await this.#client.chat.postEphemeral({
       channel: context.channelId,
-      text: truncate(safeSlackText(message), this.#maxCharacters),
+      text: truncate(safeSlackText(message, this.#redact), this.#maxCharacters),
       thread_ts: context.threadTs,
       user: userId,
     });

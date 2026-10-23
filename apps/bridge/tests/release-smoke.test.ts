@@ -95,6 +95,7 @@ describe("portable runtime dependency verification", () => {
       "persistence/sqlite",
       "persistence/legacy-schema",
       "persistence/native-conversation-store",
+      "slack/redact-sensitive",
       "validation/parse",
     ]) {
       const source = readFileSync(

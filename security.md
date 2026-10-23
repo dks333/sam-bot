@@ -18,6 +18,10 @@ Claude Code uses the owner's subscription through its unmodified local CLI. The 
 
 Native command, file, and permission prompts are forwarded through single-use Slack controls bound to the configured owner, conversation, request, and turn. Controls expire when their request resolves or the bridge's deadline passes. Ordinary messages and answers to questions do not approve tool use. One-time approvals do not become persistent permissions.
 
+Approval cards show the complete scope as literal text, including absolute paths, only to the configured owner. Requests containing credentials, hidden display characters, or more text than the card can hold require local review; the bridge never approves a shortened or redacted action.
+
+Slack output filters known credential formats and the configured Slack tokens. Complete final responses are filtered before splitting into messages. This reduces accidental disclosure but cannot identify every password, encoded secret, or proprietary value. Keep sensitive tasks and secret input local. Previously prepared delivery parts cannot be rewritten silently when the output policy changes; a mismatch requires local reconciliation.
+
 Unsupported native interactions fail closed. Secret questions, connector authentication, and verification challenges require local completion. Authentication and tool access remain subject to the native agent and connected service.
 
 ## Persistence and recovery

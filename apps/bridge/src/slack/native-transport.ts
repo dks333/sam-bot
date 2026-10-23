@@ -81,8 +81,11 @@ function provenNotSent(error: unknown): never {
   throw error;
 }
 
-export function nativeSlackTransport(client: WebClient): NativeSlackTransport {
-  const responder = new WebApiSlackResponder(client, 39_000);
+export function nativeSlackTransport(
+  client: WebClient,
+  redactText: (text: string) => string = redactSensitiveText,
+): NativeSlackTransport {
+  const responder = new WebApiSlackResponder(client, 39_000, redactText);
   let botIdentity: Promise<{ userId: string; botId: string; teamId: string }> | undefined;
   async function ownIdentity() {
     if (botIdentity === undefined) {
@@ -109,7 +112,7 @@ export function nativeSlackTransport(client: WebClient): NativeSlackTransport {
     const arguments_ = {
       channel: delivery.channelId,
       thread_ts: delivery.threadTs,
-      text: slackMrkdwn(redactSensitiveText(text)),
+      text: slackMrkdwn(redactText(text)),
       blocks: [],
       client_msg_id: id,
     };
@@ -189,7 +192,7 @@ export function nativeSlackTransport(client: WebClient): NativeSlackTransport {
         const response = await client.chat.update({
           channel: delivery.channelId,
           ts: receipt,
-          text: slackMrkdwn(redactSensitiveText(text)),
+          text: slackMrkdwn(redactText(text)),
           blocks: [],
         });
         if (

@@ -105,6 +105,7 @@ export class NativeSlackService {
     logger: Pick<Logger, "info" | "warn" | "error">;
     onTransportClosed?: () => void;
     onActivity?: (snapshot: NativeActivitySnapshot) => void;
+    redactSensitiveText?: (text: string) => string;
   }) {
     this.#native = options.native;
     this.#agentName = options.agentName ?? "Codex";
@@ -115,6 +116,9 @@ export class NativeSlackService {
     this.#logger = options.logger;
     this.#onActivity = options.onActivity;
     this.#finalDelivery = new NativeFinalDelivery({
+      ...(options.redactSensitiveText === undefined
+        ? {}
+        : { redactSensitiveText: options.redactSensitiveText }),
       store: this.#store,
       transport: this.#transport,
       logger: this.#logger,
@@ -124,6 +128,9 @@ export class NativeSlackService {
       },
     });
     this.#input = new NativeInputRelay({
+      ...(options.redactSensitiveText === undefined
+        ? {}
+        : { redactSensitiveText: options.redactSensitiveText }),
       agentName: this.#agentName,
       postApproval: (input) => this.#transport.approval(input),
       postInfo: (input) => this.#transport.privateInfo(input),
