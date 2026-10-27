@@ -94,7 +94,8 @@ const version = spawnSync(process.execPath, [contained(path.resolve(codex.direct
   maxBuffer: 65536,
 });
 if (version.status !== 0 || version.stdout.trim() !== "codex-cli " + expectedVersion) {
-  throw new Error("Staged Codex executable did not confirm its pinned version: " + (version.stderr || version.stdout || version.error?.message || "unknown error"));
+  const outcome = version.signal === null ? "exit status " + version.status : "signal " + version.signal;
+  throw new Error("Staged Codex executable did not confirm its pinned version: " + (version.stderr || version.stdout || version.error?.message || outcome));
 }
 const { SqliteStore } = await import(pathToFileURL(contained(path.join(root, "dist", "persistence", "sqlite.js"))).href);
 const { legacyMigrations } = await import(pathToFileURL(contained(path.join(root, "dist", "persistence", "legacy-schema.js"))).href);
@@ -169,7 +170,9 @@ export function verifyStagedRuntime(
       },
     );
     if (result.status !== 0) {
-      const reason = result.stderr || result.stdout || result.error?.message || "unknown error";
+      const outcome =
+        result.signal === null ? `exit status ${result.status}` : `signal ${result.signal}`;
+      const reason = result.stderr || result.stdout || result.error?.message || outcome;
       throw new Error(`Staged runtime dependency verification failed: ${reason.slice(0, 2_000)}`);
     }
     return parseArk(evidenceType, JSON.parse(result.stdout), "staged runtime dependency evidence");

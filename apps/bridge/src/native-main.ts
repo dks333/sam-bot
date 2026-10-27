@@ -19,6 +19,7 @@ import {
   NativeConversationStore,
 } from "./persistence/native-conversation-store.js";
 import { acquireRuntimeOwner } from "./runtime/runtime-owner.js";
+import { assertSupportedNodeVersion } from "./runtime/node-version.js";
 import { RuntimeStartup, registerStartupSignals } from "./runtime/startup-lifecycle.js";
 import { createSlackApp } from "./slack/app.js";
 import { AgentSessionStatusAdapter } from "./slack/agent-session-status.js";
@@ -31,6 +32,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export async function startNativeSlack(product: ReturnType<typeof loadProduct>): Promise<void> {
+  assertSupportedNodeVersion();
   const config = product.bridge;
   const redactText = (text: string): string =>
     redactSensitiveText(text, [config.botToken, config.appToken]);

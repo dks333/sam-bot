@@ -59,6 +59,22 @@ function fixture() {
 }
 
 describe("native startup ownership", () => {
+  it("rejects an unsupported Node version before opening runtime storage", async () => {
+    const { product } = fixture();
+    const descriptor = Object.getOwnPropertyDescriptor(process.versions, "node");
+    if (descriptor === undefined) throw new Error("Expected the runtime Node version");
+    const open = vi.spyOn(SqliteStore, "open");
+    Object.defineProperty(process.versions, "node", { value: "22.13.0" });
+    try {
+      await expect(startNativeSlack(product)).rejects.toThrow("SQLite requires Node-API 10");
+      expect(open).not.toHaveBeenCalled();
+      expect(acquireRuntimeOwner).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.versions, "node", descriptor);
+      open.mockRestore();
+    }
+  });
+
   it("refuses a second runtime before migrating the live owner's version-one ledger", async () => {
     const { product, nativeFile } = fixture();
     const native = new NativeConversationStore(nativeFile);

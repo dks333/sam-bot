@@ -176,4 +176,23 @@ describe("portable runtime dependency verification", () => {
     symlinkSync(outside, path.join(root, "node_modules", "better-sqlite3"));
     expect(() => verifyStagedRuntime(root, "0.155.1")).toThrow("dependencies must resolve inside");
   }, 20_000);
+
+  it.each([
+    ["process.kill(process.pid, 'SIGTERM')", "signal SIGTERM"],
+    ["process.exit(7)", "exit status 7"],
+  ])("reports a silent native probe failure from %s", (source, reason) => {
+    const { root, write } = fixture();
+    write("node_modules/better-sqlite3/index.cjs", `${source};\n`);
+
+    expect(() => verifyStagedRuntime(root, "0.155.1")).toThrow(reason);
+  });
+
+  it("reports a staged Codex process terminated by a signal", () => {
+    const { root, write } = fixture();
+    write("node_modules/@openai/codex/bin/codex.js", "process.kill(process.pid, 'SIGTERM');\n");
+
+    expect(() => verifyStagedRuntime(root, "0.155.1")).toThrow(
+      "Staged Codex executable did not confirm its pinned version: signal SIGTERM",
+    );
+  });
 });
