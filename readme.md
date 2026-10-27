@@ -1,7 +1,5 @@
 # Sam Bot
 
-Your coding setup, one Slack message away.
-
 Send work to Codex or Claude Code running on your computer. Sam Bot uses your local checkout and agent configuration, then brings replies, questions, and supported approvals back to Slack.
 
 ## Why Sam Bot?
