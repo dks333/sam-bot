@@ -4,7 +4,7 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 
-export const nativeConversationSchemaVersion = 1;
+export const nativeConversationSchemaVersion = 2;
 
 function schemaVersion(database: Database.Database): number {
   const version = database.pragma("user_version", { simple: true });
@@ -65,6 +65,8 @@ export interface NativeClaim {
   threadTs: string;
   messageTs: string;
   text: string;
+  enterpriseId?: string;
+  directMessage?: boolean;
 }
 
 export interface NativeDelivery extends NativeClaim {
@@ -79,6 +81,7 @@ export interface NativeDelivery extends NativeClaim {
   progressMessageTs?: string;
   deliveryMessageTs?: string;
   unadmittedTurnId?: string;
+  revokedAt?: string;
 }
 
 export interface NativeConversation {
@@ -233,6 +236,15 @@ function delivery(value: unknown): NativeDelivery {
   if (fields.progressMessageTs !== undefined) result.progressMessageTs = fields.progressMessageTs;
   if (fields.deliveryMessageTs !== undefined) result.deliveryMessageTs = fields.deliveryMessageTs;
   if (fields.rootEventId !== undefined) result.rootEventId = fields.rootEventId;
+  const enterpriseId = optionalString(row, "enterprise_id");
+  const revokedAt = optionalString(row, "revoked_at");
+  if (enterpriseId !== undefined) result.enterpriseId = enterpriseId;
+  if (revokedAt !== undefined) result.revokedAt = revokedAt;
+  if (row.direct_message !== null && row.direct_message !== undefined) {
+    if (row.direct_message !== 0 && row.direct_message !== 1)
+      throw new Error("The native direct-message binding is invalid");
+    result.directMessage = row.direct_message === 1;
+  }
   if (row.completion_status !== null)
     result.completionStatus = completionStatus(row.completion_status);
   return result;
@@ -290,6 +302,7 @@ export class NativeConversationStore {
         state TEXT NOT NULL CHECK(state IN ('queued','dispatching','running','completed','failed','uncertain','delivered')),
         native_turn_id TEXT, final_text TEXT, completion_status TEXT,
         progress_message_ts TEXT, delivery_message_ts TEXT,
+        enterprise_id TEXT, direct_message INTEGER CHECK(direct_message IN (0,1)), revoked_at TEXT,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         UNIQUE(team_id,channel_id,message_ts)
       );
@@ -318,6 +331,15 @@ export class NativeConversationStore {
         event_id TEXT PRIMARY KEY REFERENCES native_deliveries(event_id), expected_turn_id TEXT NOT NULL
       );
         `);
+          const columns = this.#database.prepare("PRAGMA table_info(native_deliveries)").all();
+          for (const { name, definition } of [
+            { name: "enterprise_id", definition: "TEXT" },
+            { name: "direct_message", definition: "INTEGER CHECK(direct_message IN (0,1))" },
+            { name: "revoked_at", definition: "TEXT" },
+          ]) {
+            if (!columns.some((column) => stringField(record(column), "name") === name))
+              this.#database.exec(`ALTER TABLE native_deliveries ADD COLUMN ${name} ${definition}`);
+          }
           this.#database.pragma(`user_version = ${nativeConversationSchemaVersion}`);
         })
         .immediate();
@@ -332,6 +354,9 @@ export class NativeConversationStore {
   }
 
   claim(input: NativeClaim): NativeDelivery | undefined {
+    if (input.enterpriseId !== undefined) inputString(input.enterpriseId, "enterprise");
+    if (input.directMessage !== undefined && typeof input.directMessage !== "boolean")
+      throw new Error("The native direct-message binding is invalid");
     for (const [name, value] of Object.entries({
       eventId: input.eventId,
       teamId: input.teamId,
@@ -357,8 +382,8 @@ export class NativeConversationStore {
         const now = new Date().toISOString();
         this.#database
           .prepare(`INSERT INTO native_deliveries
-        (event_id,conversation_key,team_id,user_id,channel_id,thread_ts,message_ts,text,state,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,'queued',?,?)`)
+        (event_id,conversation_key,team_id,user_id,channel_id,thread_ts,message_ts,text,state,created_at,updated_at,enterprise_id,direct_message)
+        VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?)`)
           .run(
             input.eventId,
             key,
@@ -370,6 +395,8 @@ export class NativeConversationStore {
             input.text,
             now,
             now,
+            input.enterpriseId ?? null,
+            input.directMessage === undefined ? null : Number(input.directMessage),
           );
         return this.getDelivery(input.eventId);
       })
@@ -421,6 +448,38 @@ export class NativeConversationStore {
       .map((value) => this.#required(stringField(record(value), "event_id")));
   }
 
+  revokeUnauthorized(authorized: (delivery: NativeDelivery) => boolean): number {
+    return this.#database
+      .transaction(() => {
+        const candidates = this.#database
+          .prepare(
+            "SELECT event_id FROM native_deliveries WHERE delivery_message_ts IS NULL AND revoked_at IS NULL ORDER BY rowid",
+          )
+          .all();
+        let revoked = 0;
+        for (const candidate of candidates) {
+          const current = this.#required(stringField(record(candidate), "event_id"));
+          if (authorized(current)) continue;
+          this.#database
+            .prepare("UPDATE native_deliveries SET revoked_at=?,updated_at=? WHERE event_id=?")
+            .run(new Date().toISOString(), new Date().toISOString(), current.eventId);
+          if (current.completionStatus === undefined) {
+            let status: NativeCompletionStatus = "uncertain";
+            if (current.state === "queued" || current.unadmittedTurnId !== undefined)
+              status = "failed";
+            this.complete(
+              current.eventId,
+              "Access to this retained request was revoked. It will not resume or send further Slack replies; any dispatched execution remains subject to local verification.",
+              status,
+            );
+          }
+          revoked += 1;
+        }
+        return revoked;
+      })
+      .immediate();
+  }
+
   bind(key: string, threadId: string, cwd: string): void {
     inputString(threadId, "native thread");
     inputString(cwd, "working directory");
@@ -436,6 +495,8 @@ export class NativeConversationStore {
     this.#database
       .transaction(() => {
         const current = this.#required(eventId);
+        if (current.revokedAt !== undefined)
+          throw new Error("Access to this native request was revoked");
         const conversation = this.getConversation(current.conversationKey);
         if (current.state !== "queued" || conversation?.state !== "idle")
           throw new Error("The native conversation cannot dispatch this event");
@@ -544,7 +605,7 @@ export class NativeConversationStore {
     return this.#database
       .prepare(`SELECT delivery.event_id FROM native_deliveries delivery
       JOIN native_unadmitted_steers retained ON retained.event_id=delivery.event_id
-      WHERE delivery.completion_status IS NULL ORDER BY delivery.rowid`)
+      WHERE delivery.completion_status IS NULL AND delivery.revoked_at IS NULL ORDER BY delivery.rowid`)
       .all()
       .map((value) => this.#required(stringField(record(value), "event_id")));
   }
@@ -553,6 +614,8 @@ export class NativeConversationStore {
     this.#database
       .transaction(() => {
         const current = this.#required(eventId);
+        if (current.revokedAt !== undefined)
+          throw new Error("Access to this native request was revoked");
         const conversation = this.getConversation(current.conversationKey);
         const terminal = this.#database
           .prepare(`SELECT event_id FROM native_deliveries
@@ -670,7 +733,7 @@ export class NativeConversationStore {
   pendingDeliveries(): NativeDelivery[] {
     return this.#database
       .prepare(
-        "SELECT delivery.* FROM native_deliveries delivery LEFT JOIN native_followups followup ON followup.event_id=delivery.event_id WHERE delivery.final_text IS NOT NULL AND delivery.delivery_message_ts IS NULL AND followup.root_event_id IS NULL ORDER BY delivery.rowid",
+        "SELECT delivery.* FROM native_deliveries delivery LEFT JOIN native_followups followup ON followup.event_id=delivery.event_id WHERE delivery.final_text IS NOT NULL AND delivery.delivery_message_ts IS NULL AND delivery.revoked_at IS NULL AND followup.root_event_id IS NULL ORDER BY delivery.rowid",
       )
       .all()
       .map(delivery);
@@ -695,7 +758,7 @@ export class NativeConversationStore {
         if (result.changes !== 1)
           throw new Error("The native delivery has no final result or its receipt changed");
         for (const follower of this.#linkedFollowers(eventId)) {
-          if (follower.finalText !== undefined) {
+          if (follower.finalText !== undefined && follower.revokedAt === undefined) {
             if (
               follower.finalText !== current.finalText ||
               follower.completionStatus !== current.completionStatus
@@ -718,6 +781,8 @@ export class NativeConversationStore {
     return this.#database
       .transaction(() => {
         const current = this.#required(eventId);
+        if (current.revokedAt !== undefined)
+          throw new Error("Access to this native delivery was revoked");
         if (current.finalText === undefined || current.rootEventId !== undefined)
           throw new Error("Only a primary persisted native final can prepare delivery");
         let expected = transform(current.finalText);

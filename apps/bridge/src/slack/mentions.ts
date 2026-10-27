@@ -3,8 +3,14 @@ export interface MentionCommand {
   prompt: string;
 }
 
-export function removeBotMention(text: string): string {
-  return text.replace(/<@[A-Z0-9]+>/gu, "").trim();
+export function removeBotMention(text: string, botUserId?: string): string {
+  if (botUserId === undefined) return text;
+  return text
+    .replace(/<@([A-Z0-9]+)>/gu, (mention: string, userId: string) => {
+      if (userId === botUserId) return "";
+      return mention;
+    })
+    .trim();
 }
 
 export function removeAddressedBotMention(text: string, botUserId?: string): string {

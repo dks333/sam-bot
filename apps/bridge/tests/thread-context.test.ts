@@ -245,4 +245,142 @@ describe("Slack thread context", () => {
     expect(called).toBe(false);
     expect(context).toBeUndefined();
   });
+
+  it("paginates long threads and retains recent replies with an omission marker", async () => {
+    const cursors: (string | undefined)[] = [];
+    const context = await loadSlackThreadContext({
+      allowedChannelIds: new Set(["C1"]),
+      channelId: "C1",
+      currentMessageTs: "1000.000000",
+      threadTs: "100.000000",
+      fetchReplies: async (input) => {
+        cursors.push(input.cursor);
+        const start = input.cursor === undefined ? 100 : 200;
+        return {
+          messages: Array.from({ length: 100 }, (_, index) => ({
+            ts: `${start + index}.000000`,
+            user: "U_SYNTHETIC",
+            text: `Synthetic reply ${start + index}`,
+          })),
+          has_more: input.cursor === undefined,
+          response_metadata: { next_cursor: input.cursor === undefined ? "second-page" : "" },
+        };
+      },
+    });
+    expect(cursors).toEqual([undefined, "second-page"]);
+    expect(context).toContain("Synthetic reply 100");
+    expect(context).toContain("Synthetic reply 299");
+    expect(context).not.toContain("Synthetic reply 101\n");
+    expect(context).toContain("Earlier Slack replies omitted");
+  });
+
+  it("paginates forwarded threads using the same recent context bounds", async () => {
+    const calls: unknown[] = [];
+    const context = await loadSlackThreadContext({
+      allowedChannelIds: new Set(["C1", "C2"]),
+      channelId: "C1",
+      currentMessageTs: "1000.000000",
+      threadTs: "500.000000",
+      fetchReplies: async (input) => {
+        calls.push(input);
+        if (input.channel === "C1")
+          return {
+            messages: [
+              {
+                ts: "500.000000",
+                user: "U_SYNTHETIC",
+                attachments: [{ from_url: "https://example.slack.com/archives/C2/p100000000" }],
+              },
+            ],
+          };
+        if (input.cursor === undefined)
+          return {
+            messages: [{ ts: "100.000000", text: "Synthetic forwarded parent" }],
+            has_more: true,
+            response_metadata: { next_cursor: "forwarded-next" },
+          };
+        return { messages: [{ ts: "200.000000", text: "Synthetic forwarded recent decision" }] };
+      },
+    });
+    expect(calls).toHaveLength(3);
+    expect(calls[2]).toMatchObject({ channel: "C2", cursor: "forwarded-next" });
+    expect(context).toContain("Synthetic forwarded recent decision");
+  });
+
+  it("marks incomplete history when the page budget is exhausted", async () => {
+    let pages = 0;
+    const context = await loadSlackThreadContext({
+      allowedChannelIds: new Set(["C1"]),
+      channelId: "C1",
+      currentMessageTs: "9999.000000",
+      threadTs: "100.000000",
+      fetchReplies: async () => {
+        pages += 1;
+        return {
+          messages: [{ ts: `${100 + pages}.000000`, text: `Synthetic page ${pages}` }],
+          has_more: true,
+          response_metadata: { next_cursor: `page-${pages + 1}` },
+        };
+      },
+    });
+    expect(pages).toBe(10);
+    expect(context).toContain("Synthetic page 10");
+    expect(context).toContain("additional replies, including newer messages, may be missing");
+  });
+
+  it("does not loop on repeated cursors or silently treat pagination as complete", async () => {
+    let pages = 0;
+    const context = await loadSlackThreadContext({
+      allowedChannelIds: new Set(["C1"]),
+      channelId: "C1",
+      currentMessageTs: "9999.000000",
+      threadTs: "100.000000",
+      fetchReplies: async () => {
+        pages += 1;
+        return {
+          messages: [{ ts: "100.000000", text: "Synthetic parent" }],
+          response_metadata: { next_cursor: "repeated" },
+        };
+      },
+    });
+    expect(pages).toBe(2);
+    expect(context).toContain("history is incomplete");
+  });
+
+  it("retains available history and marks a later page failure", async () => {
+    const context = await loadSlackThreadContext({
+      allowedChannelIds: new Set(["C1"]),
+      channelId: "C1",
+      currentMessageTs: "9999.000000",
+      threadTs: "100.000000",
+      fetchReplies: async (input) => {
+        if (input.cursor !== undefined) throw new Error("Synthetic pagination failure");
+        return {
+          messages: [{ ts: "100.000000", text: "Synthetic available context" }],
+          response_metadata: { next_cursor: "unavailable-page" },
+        };
+      },
+    });
+    expect(context).toContain("Synthetic available context");
+    expect(context).toContain("history is incomplete");
+  });
+
+  it("retains recent discussion when the character budget is exceeded", async () => {
+    const context = await loadSlackThreadContext({
+      allowedChannelIds: new Set(["C1"]),
+      channelId: "C1",
+      currentMessageTs: "9999.000000",
+      threadTs: "100.000000",
+      fetchReplies: async () => ({
+        messages: Array.from({ length: 20 }, (_, index) => ({
+          ts: `${100 + index}.000000`,
+          text: `Synthetic decision ${index} ${"x".repeat(1000)}`,
+        })),
+      }),
+    });
+    expect(context?.length).toBeLessThanOrEqual(12_000);
+    expect(context).toContain("earlier context omitted");
+    expect(context).toContain("Synthetic decision 19");
+    expect(context).not.toContain("Synthetic decision 0 ");
+  });
 });

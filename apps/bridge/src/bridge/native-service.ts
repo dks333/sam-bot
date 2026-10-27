@@ -1,9 +1,14 @@
 import type { Logger } from "pino";
 
 import { NativeFinalDelivery } from "./native-final-delivery.js";
+import {
+  isNativeDeliveryAuthorized,
+  revokeUnauthorizedDeliveries,
+} from "./retained-authorization.js";
 export { splitNativeResponse } from "./native-final-delivery.js";
 
 import { composeSlackRequest } from "../slack/request-context.js";
+import { authorizeSlackIdentity, type AuthorizationPolicy } from "../slack/authorize.js";
 
 import type { AppServerRequest } from "../codex/app-server-client.js";
 import { isUnadmittedNativeSteer } from "../codex/native-conversation.js";
@@ -81,6 +86,7 @@ export class NativeSlackService {
   readonly #store: NativeConversationStore;
   readonly #transport: NativeSlackTransport;
   readonly #cwd: string;
+  readonly #authorizationPolicy: AuthorizationPolicy;
   readonly #assertOwned: () => void;
   readonly #logger: Pick<Logger, "info" | "warn" | "error">;
   readonly #input: NativeInputRelay;
@@ -101,6 +107,7 @@ export class NativeSlackService {
     store: NativeConversationStore;
     transport: NativeSlackTransport;
     cwd: string;
+    authorizationPolicy: AuthorizationPolicy;
     assertOwned: () => void;
     logger: Pick<Logger, "info" | "warn" | "error">;
     onTransportClosed?: () => void;
@@ -112,6 +119,14 @@ export class NativeSlackService {
     this.#store = options.store;
     this.#transport = options.transport;
     this.#cwd = options.cwd;
+    this.#authorizationPolicy = {
+      allowedTeamId: options.authorizationPolicy.allowedTeamId,
+      allowedUserId: options.authorizationPolicy.allowedUserId,
+      allowedChannelIds: new Set(options.authorizationPolicy.allowedChannelIds),
+      ...(options.authorizationPolicy.allowedEnterpriseId === undefined
+        ? {}
+        : { allowedEnterpriseId: options.authorizationPolicy.allowedEnterpriseId }),
+    };
     this.#assertOwned = options.assertOwned;
     this.#logger = options.logger;
     this.#onActivity = options.onActivity;
@@ -169,13 +184,24 @@ export class NativeSlackService {
   }
 
   async recover(): Promise<void> {
+    this.#assertReady();
     this.#store.failUncertainOnStartup();
+    revokeUnauthorizedDeliveries(this.#store, this.#authorizationPolicy);
     for (const conversation of this.#store.listConversations()) {
+      const latest = this.#store.lastForConversation(conversation.key);
+      const authorized = latest !== undefined && this.#isAuthorized(latest);
       if (
         conversation.state === "uncertain" &&
         conversation.threadId !== undefined &&
         conversation.activeTurnId !== undefined
       ) {
+        if (!authorized) {
+          try {
+            await this.#native.interrupt(conversation.threadId, conversation.activeTurnId);
+          } catch (error) {
+            this.#logger.warn({ error }, "Revoked native execution could not be interrupted");
+          }
+        }
         try {
           const turn = await this.#native.readTurn(
             conversation.threadId,
@@ -195,6 +221,7 @@ export class NativeSlackService {
           this.#logger.warn({ error }, "Native recovery remains uncertain");
         }
       }
+      if (!authorized) continue;
       const delivery = this.#store.lastForConversation(conversation.key);
       if (delivery !== undefined) this.#publishActivity(delivery);
     }
@@ -218,6 +245,12 @@ export class NativeSlackService {
 
   async handleMention(input: HandleMentionInput): Promise<void> {
     this.#assertOwned();
+    if (
+      !authorizeSlackIdentity(input.identity, this.#authorizationPolicy, {
+        directMessage: input.directMessage === true,
+      }).authorized
+    )
+      throw new Error("This Slack request is no longer authorized");
     if (this.#stopping)
       throw new Error(`${this.#agentName} is restarting. Please try again shortly.`);
     if (input.command.type !== "prompt")
@@ -229,6 +262,10 @@ export class NativeSlackService {
       userId: input.identity.userId,
       channelId: input.identity.channelId,
       threadTs: input.slackThreadTs,
+      ...(input.identity.enterpriseId === undefined
+        ? {}
+        : { enterpriseId: input.identity.enterpriseId }),
+      directMessage: input.directMessage ?? false,
     };
     const delivery = this.#store.claim({
       ...binding,
@@ -396,6 +433,7 @@ export class NativeSlackService {
     text: string,
   ): Promise<void> {
     this.#assertReady();
+    this.#assertAuthorized(delivery);
     this.#store.steering(delivery.eventId, turnId);
     this.#assertReady();
     try {
@@ -428,6 +466,7 @@ export class NativeSlackService {
 
   async handleApproval(input: HandleApprovalInput): Promise<void> {
     this.#assertOwned();
+    this.#assertIdentityAuthorized(input.identity, input.identity.channelId.startsWith("D"));
     const accepted = this.#input.approve({
       approvalId: input.approvalId,
       approved: input.approved,
@@ -449,6 +488,7 @@ export class NativeSlackService {
     return (
       !this.#stopping &&
       active !== undefined &&
+      this.#isAuthorized(active.delivery) &&
       !active.terminal &&
       active.turnId === turnId &&
       !this.#waitingThreads.has(active.threadId) &&
@@ -464,6 +504,10 @@ export class NativeSlackService {
 
   async #stop(input: HandleConversationActionInput): Promise<string> {
     this.#assertOwned();
+    this.#assertIdentityAuthorized(
+      input.identity,
+      input.directMessage ?? input.identity.channelId.startsWith("D"),
+    );
     const active = this.#active.get(conversationKey(input));
     if (active === undefined || active.terminal)
       return `No active ${this.#agentName} turn in this Slack thread.`;
@@ -526,6 +570,10 @@ export class NativeSlackService {
   }
 
   async handleNewSession(input: HandleConversationActionInput): Promise<void> {
+    this.#assertIdentityAuthorized(
+      input.identity,
+      input.directMessage ?? input.identity.channelId.startsWith("D"),
+    );
     await input.responder.postInfo(
       input.replyContext,
       `Start a new Slack thread for a new ${this.#agentName} conversation.`,
@@ -570,6 +618,7 @@ export class NativeSlackService {
     input: Pick<HandleMentionInput, "imagePaths" | "slackContext">,
   ): Promise<ActiveTurn> {
     this.#assertReady();
+    this.#assertAuthorized(delivery);
     let conversation = this.#store.getConversation(delivery.conversationKey);
     if (conversation?.state === "uncertain") {
       if (conversation.threadId === undefined || conversation.activeTurnId === undefined)
@@ -811,6 +860,7 @@ export class NativeSlackService {
     );
     if (active === undefined)
       throw new Error(`This ${this.#agentName} request has no active Slack conversation`);
+    this.#assertAuthorized(active.delivery);
     if (typeof params.turnId === "string" && active.turnId === undefined)
       this.#bindTurn(active, params.turnId);
     if (params.turnId !== undefined && params.turnId !== null && params.turnId !== active.turnId)
@@ -854,6 +904,23 @@ export class NativeSlackService {
     if (this.#stopping) throw new Error(`${this.#agentName} is restarting.`);
   }
 
+  #isAuthorized(delivery: NativeDelivery): boolean {
+    const current = this.#store.getDelivery(delivery.eventId);
+    return current !== undefined && isNativeDeliveryAuthorized(current, this.#authorizationPolicy);
+  }
+
+  #assertAuthorized(delivery: NativeDelivery): void {
+    if (!this.#isAuthorized(delivery)) throw new Error("Access to this native request was revoked");
+  }
+
+  #assertIdentityAuthorized(
+    identity: HandleApprovalInput["identity"],
+    directMessage: boolean,
+  ): void {
+    if (!authorizeSlackIdentity(identity, this.#authorizationPolicy, { directMessage }).authorized)
+      throw new Error("This Slack request is no longer authorized");
+  }
+
   #linkAnswer(delivery: NativeDelivery): boolean {
     const active = this.#active.get(delivery.conversationKey);
     if (active === undefined || active.terminal || active.turnId === undefined) return false;
@@ -867,6 +934,7 @@ export class NativeSlackService {
   #publishActivity(delivery: NativeDelivery): void {
     try {
       this.#assertOwned();
+      if (!this.#isAuthorized(delivery)) return;
       const conversation = this.#store.getConversation(delivery.conversationKey);
       if (conversation === undefined) return;
       const latest = this.#store.lastForConversation(delivery.conversationKey);
@@ -973,6 +1041,7 @@ export class NativeSlackService {
           .listUnadmitted()
           .find((delivery) => delivery.conversationKey === key);
         if (retained?.unadmittedTurnId === undefined) return;
+        this.#assertAuthorized(retained);
         this.#store.retryUnadmitted(retained.eventId, retained.unadmittedTurnId);
         await this.#start(retained, {});
       });
@@ -1002,6 +1071,8 @@ export class NativeSlackService {
 
   async #deliverOnce(eventId: string): Promise<void> {
     if (this.#stopping) return;
+    const current = this.#store.getDelivery(eventId);
+    if (current === undefined || !this.#isAuthorized(current)) return;
     const active = [...this.#active.values()].find((turn) => turn.delivery.eventId === eventId);
     if (active !== undefined) await Promise.allSettled(active.pendingSteers);
     if (this.#stopping) return;

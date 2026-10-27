@@ -21,6 +21,7 @@ import { NativeConversation } from "../src/codex/native-conversation.js";
 import { NativeConversationStore } from "../src/persistence/native-conversation-store.js";
 import type { SlackResponder } from "../src/slack/responder.js";
 import type { NativeSlackTransport } from "../src/slack/native-transport.js";
+import type { AuthorizationPolicy } from "../src/slack/authorize.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 
@@ -39,7 +40,13 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function setup() {
+function setup(
+  authorizationPolicy: AuthorizationPolicy = {
+    allowedTeamId: "T1",
+    allowedUserId: "U1",
+    allowedChannelIds: new Set(["D1", "C1"]),
+  },
+) {
   const directory = mkdtempSync(path.join(tmpdir(), "native-service-synthetic-"));
   const store = new NativeConversationStore(path.join(directory, "transport.sqlite"));
   const handlers = new Set<AppServerMessageHandler>();
@@ -103,6 +110,7 @@ function setup() {
     native,
     store,
     cwd: "/synthetic/project",
+    authorizationPolicy,
     transport: {
       post,
       postFinal: post,
@@ -176,6 +184,144 @@ function setup() {
 async function waitForTurn(harness: ReturnType<typeof setup>, eventId: string) {
   await vi.waitFor(() => expect(harness.store.getDelivery(eventId)?.state).toBe("running"));
 }
+
+describe("retained Slack authorization", () => {
+  it.each([
+    { allowedTeamId: "T1", allowedUserId: "U2", allowedChannelIds: new Set(["D1"]) },
+    { allowedTeamId: "T2", allowedUserId: "U1", allowedChannelIds: new Set(["D1"]) },
+    { allowedTeamId: "T1", allowedUserId: "U1", allowedChannelIds: new Set(["C2"]) },
+  ])(
+    "suppresses retained execution, final replies, and activity after access is removed",
+    async (policy) => {
+      const harness = setup(policy);
+      const primary = harness.store.claim({
+        eventId: "revoked-primary",
+        teamId: "T1",
+        userId: "U1",
+        channelId: "D1",
+        threadTs: "synthetic-thread",
+        messageTs: "1.1",
+        text: "Synthetic primary",
+        directMessage: false,
+      });
+      const retained = harness.store.claim({
+        eventId: "revoked-retained",
+        teamId: "T1",
+        userId: "U1",
+        channelId: "D1",
+        threadTs: "synthetic-thread",
+        messageTs: "1.2",
+        text: "Synthetic retained",
+        directMessage: false,
+      });
+      if (primary === undefined || retained === undefined)
+        throw new Error("Expected synthetic claims");
+      harness.store.bind(primary.conversationKey, "native-thread", "/synthetic/project");
+      harness.store.dispatch(primary.eventId);
+      harness.store.started(primary.eventId, "native-turn-1");
+      harness.store.steering(retained.eventId, "native-turn-1");
+      harness.store.markUnadmitted(retained.eventId, "native-turn-1");
+      harness.store.complete(primary.eventId, "Synthetic pending final", "completed");
+      harness.store.prepareFinalParts(primary.eventId, ["Synthetic pending final"]);
+      harness.store.beginFinalPart(primary.eventId, 0);
+      await harness.service.recover();
+      expect(harness.store.getDelivery(primary.eventId)).toMatchObject({
+        revokedAt: expect.any(String),
+        finalText: "Synthetic pending final",
+        completionStatus: "completed",
+      });
+      expect(harness.store.getDelivery(retained.eventId)).toMatchObject({
+        revokedAt: expect.any(String),
+        completionStatus: "failed",
+      });
+      expect(harness.store.listUnadmitted()).toEqual([]);
+      expect(harness.store.pendingDeliveries()).toEqual([]);
+      expect(harness.request).not.toHaveBeenCalled();
+      expect(harness.post).not.toHaveBeenCalled();
+      expect(harness.update).not.toHaveBeenCalled();
+      expect(harness.reconcile).not.toHaveBeenCalled();
+      expect(harness.setMessageStatus).not.toHaveBeenCalled();
+      expect(harness.activities).toEqual([]);
+    },
+  );
+
+  it("still reconciles revoked terminal execution when cancellation is rejected", async () => {
+    const harness = setup({
+      allowedTeamId: "T1",
+      allowedUserId: "U2",
+      allowedChannelIds: new Set(["D1"]),
+    });
+    const current = harness.store.claim({
+      eventId: "revoked-running",
+      teamId: "T1",
+      userId: "U1",
+      channelId: "D1",
+      threadTs: "synthetic-thread",
+      messageTs: "1.1",
+      text: "Synthetic running",
+    });
+    if (current === undefined) throw new Error("Expected synthetic claim");
+    harness.store.bind(current.conversationKey, "native-thread", "/synthetic/project");
+    harness.store.dispatch(current.eventId);
+    harness.store.started(current.eventId, "native-turn-1");
+    harness.request.mockImplementation(async (method) => {
+      if (method === "turn/interrupt") throw new Error("Synthetic already-stopped turn");
+      if (method === "thread/turns/list")
+        return {
+          data: [{ id: "native-turn-1", status: "completed", items: [] }],
+          nextCursor: null,
+        };
+      throw new Error("Unexpected synthetic native call");
+    });
+    await harness.service.recover();
+    expect(harness.request.mock.calls.map(([method]) => method)).toEqual([
+      "turn/interrupt",
+      "thread/turns/list",
+    ]);
+    expect(harness.store.getConversation(current.conversationKey)?.state).toBe("idle");
+    expect(harness.store.getDelivery(current.eventId)).toMatchObject({
+      revokedAt: expect.any(String),
+      completionStatus: "uncertain",
+    });
+    expect(harness.post).not.toHaveBeenCalled();
+    expect(harness.activities).toEqual([]);
+  });
+
+  it("retains owner-authorized direct-message replies independently of the channel allowlist", async () => {
+    const harness = setup({
+      allowedTeamId: "T1",
+      allowedUserId: "U1",
+      allowedChannelIds: new Set(["C2"]),
+    });
+    harness.store.claim({
+      eventId: "retained-direct",
+      teamId: "T1",
+      userId: "U1",
+      channelId: "D1",
+      threadTs: "synthetic-thread",
+      messageTs: "1.1",
+      text: "Synthetic direct",
+      directMessage: true,
+    });
+    await harness.service.recover();
+    await vi.waitFor(() => expect(harness.post).toHaveBeenCalledTimes(1));
+    expect(harness.store.getDelivery("retained-direct")?.revokedAt).toBeUndefined();
+  });
+
+  it("rejects unauthorized direct service intake before persisting or dispatching it", async () => {
+    const harness = setup({
+      allowedTeamId: "T1",
+      allowedUserId: "U2",
+      allowedChannelIds: new Set(["D1"]),
+    });
+    await expect(
+      harness.service.handleMention(harness.input("unauthorized", "Synthetic request")),
+    ).rejects.toThrow("no longer authorized");
+    expect(harness.store.getDelivery("unauthorized")).toBeUndefined();
+    expect(harness.request).not.toHaveBeenCalled();
+    expect(harness.post).not.toHaveBeenCalled();
+  });
+});
 
 describe("thin native Slack service", () => {
   it("starts quietly and projects native waiting and resumed execution without changing the active turn", async () => {

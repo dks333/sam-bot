@@ -48,6 +48,7 @@ import {
 import { verifyStagedRuntime } from "./release-smoke.js";
 import { launchedRuntimePid, waitForReleaseReadiness } from "./release-readiness.js";
 import { recoverFailedActivation } from "./release-recovery.js";
+import { secretQuestion } from "./secret-question.js";
 
 const cliInputType = type({
   command: "'setup' | 'doctor' | 'run' | 'service' | 'logs' | 'agent' | 'help'",
@@ -90,6 +91,7 @@ async function question(
   fallback: string | undefined,
   arguments_: string[],
   flag: string,
+  secret = false,
 ): Promise<string> {
   const supplied = flagValue(arguments_, flag);
   if (supplied !== undefined) {
@@ -101,6 +103,7 @@ async function question(
     }
     return fallback;
   }
+  if (secret) return secretQuestion(prompt, fallback);
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const suffix = fallback === undefined || fallback.length === 0 ? "" : ` [${fallback}]`;
@@ -210,12 +213,14 @@ async function setup(arguments_: string[]): Promise<void> {
     imported.SLACK_BOT_TOKEN,
     arguments_,
     "--bot-token",
+    true,
   );
   const appToken = await question(
     "Slack app-level token",
     imported.SLACK_APP_TOKEN,
     arguments_,
     "--app-token",
+    true,
   );
   if (!arguments_.includes("--skip-connectivity-check")) {
     const auth = await new WebClient(botToken).auth.test();

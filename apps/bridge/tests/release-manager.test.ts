@@ -153,7 +153,7 @@ describe("immutable runtime releases", () => {
     const store = new NativeConversationStore(nativeFile);
     store.close();
     const before = sha256(readFileSync(nativeFile));
-    expect(runtimeActivity(path.join(home, "bridge.sqlite")).nativeSchemaVersion).toBe(1);
+    expect(runtimeActivity(path.join(home, "bridge.sqlite")).nativeSchemaVersion).toBe(2);
     expect(sha256(readFileSync(nativeFile))).toBe(before);
     expect(() =>
       prepareRuntimeSwitch({
@@ -170,7 +170,7 @@ describe("immutable runtime releases", () => {
   it("checks the actual native schema before activation even when an obsolete caller supplies zero", () => {
     const home = temporaryHome();
     const old = release(home, "synthetic-old-native");
-    const compatible = release(home, "synthetic-native-compatible", 11, 1);
+    const compatible = release(home, "synthetic-native-compatible", 11, 2);
     const store = new NativeConversationStore(path.join(home, "native-conversations.sqlite"));
     store.close();
     activateRelease(home, compatible.directory, 11);
@@ -206,8 +206,8 @@ describe("immutable runtime releases", () => {
 
   it("allows rollback only when the prior release supports the current native schema", () => {
     const home = temporaryHome();
-    const prior = release(home, "synthetic-prior-compatible", 11, 1);
-    const candidate = release(home, "synthetic-new-native", 11, 1);
+    const prior = release(home, "synthetic-prior-compatible", 11, 2);
+    const candidate = release(home, "synthetic-new-native", 11, 2);
     const store = new NativeConversationStore(path.join(home, "native-conversations.sqlite"));
     store.close();
     activateRelease(home, prior.directory, 11);
@@ -218,8 +218,8 @@ describe("immutable runtime releases", () => {
       priorCurrent: prior.directory,
       priorSchemaVersion: 11,
       schemaVersion: 11,
-      priorNativeSchemaVersion: 1,
-      nativeSchemaVersion: 1,
+      priorNativeSchemaVersion: 2,
+      nativeSchemaVersion: 2,
     });
     expect(selectedRelease(home)).toBe(realpathSync(prior.directory));
   });
@@ -653,7 +653,7 @@ describe("immutable runtime releases", () => {
       }
       expect(runtimeActivity(databaseFile)).toMatchObject({
         activeRuns: 2,
-        nativeSchemaVersion: 1,
+        nativeSchemaVersion: 2,
       });
       expect(() => assertRuntimeIdle(databaseFile)).toThrow("Refusing");
       for (const [index, store] of stores.entries())
@@ -677,6 +677,73 @@ describe("immutable runtime releases", () => {
     store.close();
     expect(() => activateRelease(home, old.directory, 11)).toThrow("native conversation schema");
     expect(existsSync(path.join(home, "runtime-current"))).toBe(false);
+  });
+
+  it("ignores revoked pending output in both ledgers while retaining unknown execution blockers", () => {
+    const home = temporaryHome();
+    const databaseFile = path.join(home, "bridge.sqlite");
+    const stores = ["native-conversations.sqlite", "native-conversations-claude.sqlite"].map(
+      (filename) => new NativeConversationStore(path.join(home, filename)),
+    );
+    try {
+      for (const [index, store] of stores.entries()) {
+        const current = store.claim({
+          eventId: `synthetic-revoked-${index}`,
+          teamId: "synthetic-team",
+          userId: "synthetic-owner",
+          channelId: "synthetic-channel",
+          threadTs: "1.0",
+          messageTs: "1.1",
+          text: "Synthetic retained request",
+        });
+        if (current === undefined) throw new Error("Expected synthetic claim");
+        store.bind(current.conversationKey, `synthetic-native-${index}`, home);
+        store.dispatch(current.eventId);
+        store.started(current.eventId, `synthetic-turn-${index}`);
+        if (index === 0) store.complete(current.eventId, "Synthetic final", "completed");
+        store.revokeUnauthorized(() => false);
+      }
+      expect(runtimeActivity(databaseFile)).toMatchObject({
+        delivering: 0,
+        unresolvedExecutions: 1,
+        nativeSchemaVersion: 2,
+      });
+      expect(() => assertRuntimeIdle(databaseFile)).toThrow("Refusing");
+      const unknown = stores[1];
+      if (unknown === undefined) throw new Error("Expected synthetic inactive ledger");
+      const conversation = unknown.listConversations()[0];
+      if (conversation?.threadId === undefined || conversation.activeTurnId === undefined)
+        throw new Error("Expected retained execution evidence");
+      unknown.reconcileTerminal(conversation.key, conversation.threadId, conversation.activeTurnId);
+      expect(assertRuntimeIdle(databaseFile)).toMatchObject({
+        delivering: 0,
+        unresolvedExecutions: 0,
+      });
+    } finally {
+      for (const store of stores) store.close();
+    }
+  });
+
+  it("blocks rollback to a version-one native writer after access revocation is persisted", () => {
+    const home = temporaryHome();
+    const old = release(home, "synthetic-version-one", 11, 1);
+    const current = release(home, "synthetic-version-two", 11, 2);
+    activateRelease(home, old.directory, 11);
+    activateRelease(home, current.directory, 11);
+    const store = new NativeConversationStore(path.join(home, "native-conversations.sqlite"));
+    store.close();
+    expect(() =>
+      restoreRuntimeSelections({
+        home,
+        failedDirectory: current.directory,
+        priorCurrent: old.directory,
+        priorSchemaVersion: 11,
+        schemaVersion: 11,
+        priorNativeSchemaVersion: 1,
+        nativeSchemaVersion: 2,
+      }),
+    ).toThrow("native conversation schema");
+    expect(selectedRelease(home)).toBe(realpathSync(current.directory));
   });
 
   it.each(["codex", "claude"])(

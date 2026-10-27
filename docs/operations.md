@@ -27,6 +27,10 @@ The `SLACK_CODEX_HOME` override and existing service identifiers retain their na
 
 Live settings are outside the checkout. Setup can import an optional repository `.env` based on [the example](../.env.example). The running service reads the saved configuration and secrets. See [product-config.example.json](../config/product-config.example.json) for supported settings and [product.ts](../apps/bridge/src/config/product.ts) for setup defaults. Codex and Claude read their native settings separately. Keep tokens, databases, logs, and conversation state out of Git.
 
+Interactive setup hides Slack token entry and never displays saved token values. Press Enter at a token prompt to keep an existing saved value. Restart the bridge after changing the saved owner, team, or allowed channels. On startup, retained requests that no longer pass that policy are permanently barred from resuming or delivering pending replies, even if access is later restored. Their records remain available for local inspection; uncertain work is never replayed. Already delivered messages cannot be recalled, and revocation does not prove that detached tools stopped. Restoring access allows new requests.
+
+The first startup of this version upgrades both native conversation ledgers to schema 2. Releases that support only schema 1 cannot reopen those ledgers. Managed activation checks schema compatibility and retains unresolved execution evidence before allowing a switch.
+
 ## Conversations and permissions
 
 Each configured owner and Slack thread maps to a persistent session for the selected provider. A new top-level message starts a conversation. Channel replies must mention the bot. Codex follow-ups steer an active turn; images wait for that turn to finish. Claude follow-ups queue until the current turn ends.

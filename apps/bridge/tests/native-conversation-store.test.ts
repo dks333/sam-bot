@@ -63,13 +63,13 @@ describe("NativeConversationStore", () => {
 
   it("reads native schema metadata without changing files and rejects future writers", () => {
     const { file } = setup();
-    expect(nativeConversationSchemaVersion).toBe(1);
-    expect(readNativeConversationSchemaVersion(file)).toBe(1);
+    expect(nativeConversationSchemaVersion).toBe(2);
+    expect(readNativeConversationSchemaVersion(file)).toBe(2);
     const raw = new Database(file);
-    raw.pragma("user_version = 2");
+    raw.pragma("user_version = 3");
     raw.close();
     const before = readFileSync(file);
-    expect(readNativeConversationSchemaVersion(file)).toBe(2);
+    expect(readNativeConversationSchemaVersion(file)).toBe(3);
     expect(() => new NativeConversationStore(file)).toThrow("newer than this release");
     expect(readFileSync(file)).toEqual(before);
     expect(
@@ -589,7 +589,7 @@ describe("NativeConversationStore", () => {
     raw.pragma("user_version = 0");
     raw.close();
     const other = reopen(file);
-    expect(readNativeConversationSchemaVersion(file)).toBe(1);
+    expect(readNativeConversationSchemaVersion(file)).toBe(2);
     expect(other.getDelivery(current.eventId)).toEqual(before);
     expect(other.getDeliveryParts(current.eventId)).toEqual([{ index: 0, messageTs: "1.9" }]);
     expect(

@@ -105,9 +105,9 @@ describe("portable runtime dependency verification", () => {
       write(`dist/${relative}.js`, stripTypeScriptTypes(source));
     }
     expect(verifyStagedRuntime(root, "0.155.1")).toMatchObject({
-      betterSqliteVersion: "13.0.1",
+      betterSqliteVersion: "13.0.3",
       maximumSchemaVersion: 14,
-      maximumNativeSchemaVersion: 1,
+      maximumNativeSchemaVersion: 2,
     });
   }, 20_000);
 
