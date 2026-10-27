@@ -54,6 +54,10 @@ interface Running {
   interruptAcknowledged: boolean;
   closed: Promise<void>;
   resolveClosed: () => void;
+  exited: Promise<void>;
+  finishing?: Promise<void>;
+  terminating?: Promise<void>;
+  drainTimer?: NodeJS.Timeout;
   failed: boolean;
 }
 
@@ -287,6 +291,10 @@ export class ClaudeConversation {
       const closed = new Promise<void>((resolve) => {
         resolveClosed = resolve;
       });
+      let resolveExited = (): void => {};
+      const exited = new Promise<void>((resolve) => {
+        resolveExited = resolve;
+      });
       const reader = readline.createInterface({ input: child.stdout });
       const running: Running = {
         child,
@@ -300,6 +308,7 @@ export class ClaudeConversation {
         interruptAcknowledged: false,
         closed,
         resolveClosed,
+        exited,
         failed: false,
       };
       childToClose = running;
@@ -315,8 +324,10 @@ export class ClaudeConversation {
           this.#fail(running, "Claude returned invalid stream data");
         }
       });
-      child.once("close", (code, signal) => {
-        void this.#finished(running, code, signal)
+      const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (running.finishing !== undefined) return;
+        if (running.drainTimer !== undefined) clearTimeout(running.drainTimer);
+        running.finishing = this.#finished(running, code, signal)
           .catch(() => {
             running.turn.status = "inProgress";
             this.#emit("turn/uncertain", running, {
@@ -326,9 +337,26 @@ export class ClaudeConversation {
             });
           })
           .finally(() => {
-            if (promptFile !== undefined) void rm(promptFile, { force: true });
+            if (promptFile !== undefined)
+              void rm(promptFile, { force: true }).catch(() => undefined);
+            if (this.#running.get(running.session.id) === running)
+              this.#running.delete(running.session.id);
             resolveClosed();
           });
+      };
+      child.once("exit", (code, signal) => {
+        resolveExited();
+        running.drainTimer = setTimeout(() => {
+          running.failed = true;
+          child.stdin.destroy();
+          child.stdout.destroy();
+          child.stderr.destroy();
+          finish(code, signal);
+        }, 1_000);
+      });
+      child.once("close", (code, signal) => {
+        resolveExited();
+        finish(code, signal);
       });
       const initialized = await this.#control(running, { subtype: "initialize", hooks: null });
       if (
@@ -725,7 +753,13 @@ export class ClaudeConversation {
     running.controls.clear();
     this.#emit("thread/status/changed", running, { status: { type: "systemError" } });
     this.#emit("error", running, { error: { message } });
-    running.child.kill("SIGTERM");
+    void this.#terminate(running).catch(() => {
+      this.#emit("turn/uncertain", running, {
+        error: {
+          message: "Claude process termination could not be confirmed. Inspect it locally.",
+        },
+      });
+    });
   }
   async #finished(
     running: Running,
@@ -739,7 +773,6 @@ export class ClaudeConversation {
     }
     running.controls.clear();
     running.reader.close();
-    if (this.#running.get(running.session.id) === running) this.#running.delete(running.session.id);
     const result = running.result;
     if (
       !running.failed &&
@@ -786,7 +819,12 @@ export class ClaudeConversation {
       });
     }
   }
-  async #terminate(running: Running): Promise<void> {
+  #terminate(running: Running): Promise<void> {
+    if (running.terminating !== undefined) return running.terminating;
+    running.terminating = this.#terminateChild(running);
+    return running.terminating;
+  }
+  async #terminateChild(running: Running): Promise<void> {
     this.#cancelRequests(running);
     if (running.child.exitCode !== null || running.child.signalCode !== null) {
       await running.closed;
@@ -795,14 +833,32 @@ export class ClaudeConversation {
     running.child.kill("SIGTERM");
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([
-      running.closed,
+      running.exited,
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, 5_000);
       }),
     ]);
     if (timer !== undefined) clearTimeout(timer);
-    if (running.child.exitCode === null && running.child.signalCode === null)
+    if (running.child.exitCode === null && running.child.signalCode === null) {
       running.child.kill("SIGKILL");
+      let killTimer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          running.exited,
+          new Promise<never>((_resolve, reject) => {
+            killTimer = setTimeout(
+              () => reject(new Error("Claude process termination was not confirmed")),
+              1_000,
+            );
+          }),
+        ]);
+      } finally {
+        if (killTimer !== undefined) clearTimeout(killTimer);
+        running.child.stdin.destroy();
+        running.child.stdout.destroy();
+        running.child.stderr.destroy();
+      }
+    }
     await running.closed;
   }
 }

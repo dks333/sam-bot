@@ -2,6 +2,8 @@
 
 ## Native agent setup
 
+Sam Bot requires Node 22.14+ in the 22.x line or Node 23.6 and newer. Its SQLite binding requires Node-API 10; Node 22.13 and Node 23.0 through 23.5 cannot load it. Use the declared pnpm 11.9.0 version.
+
 Codex uses the bundled `@openai/codex` CLI unless `codex.executablePath` selects an installed executable. Set `codex.home` to your existing profile, normally `~/.codex`, to share its settings. The native configuration supplies model, reasoning effort, tools, memory, sandbox, and approval policy. Desktop host integrations may differ even with the same profile.
 
 Claude uses the locally installed `claude` CLI. It requires version 2.1.306 or newer within the 2.1 release line and a local Pro, Max, Team, or Enterprise subscription sign-in. Run `claude auth login` and `claude auth status` locally. Claude mode checks the subscription without copying OAuth tokens or falling back to API billing. Model access and usage limits come from the account. Optional `claude.executablePath` selects an absolute executable path; `claude.model` selects an available model.
@@ -26,6 +28,10 @@ Sam Bot uses `~/.slack-codex/`. These compatibility names do not mean it runs Co
 The `SLACK_CODEX_HOME` override and existing service identifiers retain their names. `pnpm codex-slack` remains a CLI alias. Existing records and schema migrations remain for compatibility.
 
 Live settings are outside the checkout. Setup can import an optional repository `.env` based on [the example](../.env.example). The running service reads the saved configuration and secrets. See [product-config.example.json](../config/product-config.example.json) for supported settings and [product.ts](../apps/bridge/src/config/product.ts) for setup defaults. Codex and Claude read their native settings separately. Keep tokens, databases, logs, and conversation state out of Git.
+
+Interactive setup hides Slack token entry and never displays saved token values. Press Enter at a token prompt to keep an existing saved value. Restart the bridge after changing the saved owner, team, or allowed channels. On startup, retained requests that no longer pass that policy are permanently barred from resuming or delivering pending replies, even if access is later restored. Their records remain available for local inspection; uncertain work is never replayed. Already delivered messages cannot be recalled, and revocation does not prove that detached tools stopped. Restoring access allows new requests.
+
+The first startup of this version upgrades both native conversation ledgers to schema 2. Releases that support only schema 1 cannot reopen those ledgers. Managed activation checks schema compatibility and retains unresolved execution evidence before allowing a switch.
 
 ## Conversations and permissions
 

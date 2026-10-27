@@ -95,6 +95,7 @@ export class NativeFinalDelivery {
     const delivery = this.#store.getDelivery(eventId);
     if (
       delivery?.finalText === undefined ||
+      delivery.revokedAt !== undefined ||
       delivery.deliveryMessageTs !== undefined ||
       delivery.rootEventId !== undefined
     )
@@ -186,7 +187,7 @@ export class NativeFinalDelivery {
     else if (delivery.completionStatus === "uncertain") status = "waiting";
     const followers = this.#store
       .listDeliveriesForConversation(delivery.conversationKey)
-      .filter((entry) => entry.rootEventId === eventId);
+      .filter((entry) => entry.rootEventId === eventId && entry.revokedAt === undefined);
     for (const target of [delivery, ...followers]) {
       this.#assertOwned();
       try {

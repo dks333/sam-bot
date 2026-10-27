@@ -20,7 +20,13 @@ const directories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
+    directories.splice(0).map(async (directory) => {
+      try {
+        const pid = Number(await readFile(path.join(directory, "descendant-pid"), "utf8"));
+        if (Number.isSafeInteger(pid) && pid > 0) process.kill(pid, "SIGTERM");
+      } catch {}
+      await rm(directory, { recursive: true, force: true });
+    }),
   );
   vi.unstubAllEnvs();
 });
@@ -35,6 +41,7 @@ async function fixture(
 ) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "claude-protocol-"));
   directories.push(directory);
+  vi.stubEnv("HOME", directory);
   const executablePath = path.join(directory, "fake-claude");
   const observedPath = path.join(directory, "observed.json");
   const script = `#!${process.execPath}
@@ -51,7 +58,7 @@ const requests = [];
 let turn;
 const finish = () => {
   out({type:"assistant",session_id:session,message:{id:"assistant-one",content:[{type:"text",text:"Interim explanation"}]}});
-  out({type:"result",subtype:"success",session_id:options.mode === "wrong-session" ? "00000000-0000-0000-0000-000000000000" : session,is_error:options.mode === "wait-error",result:"Authoritative final",...(options.mode === "wait-error" ? {errors:["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"]} : {})});
+  out({type:"result",subtype:"success",session_id:options.mode === "wrong-session" ? "00000000-0000-0000-0000-000000000000" : session,is_error:options.mode === "wait-error",result:options.mode === "buffered-final" ? "Buffered final ".repeat(20000) : "Authoritative final",...(options.mode === "wait-error" ? {errors:["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"]} : {})});
   out({type:"system",subtype:"session_state_changed",session_id:session,state:"idle"});
 };
 lines.on("line", line => {
@@ -66,6 +73,13 @@ lines.on("line", line => {
   turn=value;
   out({type:"system",subtype:"init",session_id:session,apiKeySource:"none"});
   out({type:"system",subtype:"session_state_changed",session_id:session,state:"running"});
+  if(options.mode === "held-pipes" || options.mode === "held-pipes-crash") {
+   const descendant = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {stdio:["ignore", "inherit", "inherit"]});
+   fs.writeFileSync(${JSON.stringify(path.join(directory, "descendant-pid"))}, String(descendant.pid));
+   if(options.mode === "held-pipes-crash") process.exit(9);
+   finish();
+   process.exit(0);
+  }
   if(options.mode === "crash") { process.exit(9); }
   if(options.mode === "wait" || options.mode === "wait-error") return;
   if(options.mode === "permission" || options.mode === "unknown-tool" || options.mode === "question") {
@@ -441,4 +455,54 @@ describe("Claude local subscription adapter", () => {
       await harness.conversation.close();
     },
   );
+  it.each(["held-pipes", "held-pipes-crash"])(
+    "bounds cleanup and preserves uncertainty when %s descendants retain output pipes",
+    async (mode) => {
+      const harness = await fixture({ mode });
+      const turn = await harness.conversation.startTurn(harness.session, "Synthetic task");
+      await vi.waitFor(async () =>
+        expect(
+          Number(await readFile(path.join(harness.directory, "descendant-pid"), "utf8")),
+        ).toBeGreaterThan(0),
+      );
+      const closing = harness.conversation.close();
+      await vi.waitFor(
+        () =>
+          expect(harness.events).toContainEqual(
+            expect.objectContaining({ method: "turn/uncertain" }),
+          ),
+        { timeout: 3_000 },
+      );
+      await closing;
+      const descendantPid = Number(
+        await readFile(path.join(harness.directory, "descendant-pid"), "utf8"),
+      );
+      expect(() => process.kill(descendantPid, 0)).not.toThrow();
+      expect((await harness.conversation.readTurn(harness.session, turn))?.status).toBe(
+        "inProgress",
+      );
+      expect(
+        harness.events.filter((event) => record(event) && event.method === "turn/completed"),
+      ).toHaveLength(0);
+      const resumed = new ClaudeConversation({
+        executablePath: harness.executablePath,
+        stateDirectory: path.join(harness.directory, "state"),
+      });
+      await expect(resumed.resumeThread(harness.session, harness.directory)).rejects.toThrow(
+        "terminal evidence",
+      );
+      await resumed.close();
+    },
+    10_000,
+  );
+  it("drains a buffered final before recording a normal process exit", async () => {
+    const harness = await fixture({ mode: "buffered-final" });
+    const turn = await harness.conversation.startTurn(harness.session, "Synthetic task");
+    const completed = await terminal(harness, turn);
+    expect(completed?.status).toBe("completed");
+    expect(completed?.items).toContainEqual(
+      expect.objectContaining({ text: "Buffered final ".repeat(20000), phase: "final_answer" }),
+    );
+    await harness.conversation.close();
+  });
 });

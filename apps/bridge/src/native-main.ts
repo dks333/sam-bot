@@ -7,6 +7,7 @@ import { WebClient } from "@slack/web-api";
 
 import type { ConversationBackend } from "./agents/conversation-backend.js";
 import { NativeSlackService } from "./bridge/native-service.js";
+import { revokeUnauthorizedDeliveries } from "./bridge/retained-authorization.js";
 import { ClaudeConversation } from "./claude/conversation.js";
 import { readRuntimeReleaseIdentity } from "./cli/release-manager.js";
 import { ProcessAppServerConnection, type AppServerConnection } from "./codex/app-server-client.js";
@@ -18,6 +19,7 @@ import {
   NativeConversationStore,
 } from "./persistence/native-conversation-store.js";
 import { acquireRuntimeOwner } from "./runtime/runtime-owner.js";
+import { assertSupportedNodeVersion } from "./runtime/node-version.js";
 import { RuntimeStartup, registerStartupSignals } from "./runtime/startup-lifecycle.js";
 import { createSlackApp } from "./slack/app.js";
 import { AgentSessionStatusAdapter } from "./slack/agent-session-status.js";
@@ -30,6 +32,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export async function startNativeSlack(product: ReturnType<typeof loadProduct>): Promise<void> {
+  assertSupportedNodeVersion();
   const config = product.bridge;
   const redactText = (text: string): string =>
     redactSensitiveText(text, [config.botToken, config.appToken]);
@@ -56,14 +59,6 @@ export async function startNativeSlack(product: ReturnType<typeof loadProduct>):
       ? "native-conversations.sqlite"
       : "native-conversations-claude.sqlite",
   );
-  const store = new NativeConversationStore(
-    path.join(
-      product.paths.home,
-      agentProvider === "claude"
-        ? "native-conversations-claude.sqlite"
-        : "native-conversations.sqlite",
-    ),
-  );
   const identity = readRuntimeReleaseIdentity(path.resolve(import.meta.dirname, ".."));
   const startedAt = new Date().toISOString();
   const health: Record<string, unknown> = {
@@ -76,14 +71,38 @@ export async function startNativeSlack(product: ReturnType<typeof loadProduct>):
   };
   let stopping = false;
   let shutdown: (() => Promise<void>) | undefined;
-  const owner = acquireRuntimeOwner({
-    store: runtimeStore,
-    onOwnershipLost(error) {
-      logger.error({ error: error.message }, "Native Slack runtime ownership lost");
-      process.exitCode = 1;
-      void shutdown?.();
-    },
-  });
+  let owner: ReturnType<typeof acquireRuntimeOwner>;
+  try {
+    owner = acquireRuntimeOwner({
+      store: runtimeStore,
+      onOwnershipLost(error) {
+        logger.error({ error: error.message }, "Native Slack runtime ownership lost");
+        process.exitCode = 1;
+        void shutdown?.();
+      },
+    });
+  } catch (error) {
+    runtimeStore.close();
+    throw error;
+  }
+  let store: NativeConversationStore;
+  try {
+    store = new NativeConversationStore(
+      path.join(
+        product.paths.home,
+        agentProvider === "claude"
+          ? "native-conversations-claude.sqlite"
+          : "native-conversations.sqlite",
+      ),
+    );
+  } catch (error) {
+    try {
+      owner.release();
+    } finally {
+      runtimeStore.close();
+    }
+    throw error;
+  }
   process.once("exit", () => owner.release());
   function publish(details: Record<string, unknown>): void {
     owner.assertOwned();
@@ -200,6 +219,7 @@ export async function startNativeSlack(product: ReturnType<typeof loadProduct>):
     agentName,
     store,
     cwd,
+    authorizationPolicy: config,
     logger,
     transport: nativeSlackTransport(app.client, redactText),
     redactSensitiveText: redactText,
@@ -278,7 +298,18 @@ export async function startNativeSlack(product: ReturnType<typeof loadProduct>):
       };
     });
     publish({ nativeReadiness: readiness, nativeReady: true, runtimeOwnerId: owner.ownerId });
-    await startup.run("recovery", async () => service.recover());
+    await startup.run("recovery", async () => {
+      owner.assertOwned();
+      if (existsSync(otherProviderLedgerFile)) {
+        const otherStore = new NativeConversationStore(otherProviderLedgerFile);
+        try {
+          revokeUnauthorizedDeliveries(otherStore, config);
+        } finally {
+          otherStore.close();
+        }
+      }
+      await service.recover();
+    });
     await startup.run("slack-connection", async () => {
       await app.init();
       await app.start();

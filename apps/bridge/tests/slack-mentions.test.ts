@@ -8,9 +8,19 @@ import {
 
 describe("native Slack mention intake", () => {
   it("removes the bot token while preserving the message content", () => {
-    expect(removeBotMention("<@U123BOT> Inspect the synthetic module")).toBe(
+    expect(removeBotMention("<@U123BOT> Inspect the synthetic module", "U123BOT")).toBe(
       "Inspect the synthetic module",
     );
+  });
+
+  it("preserves other users mentioned in channel requests", () => {
+    expect(removeBotMention("<@U123BOT> Ask <@U456OTHER> to review this", "U123BOT")).toBe(
+      "Ask <@U456OTHER> to review this",
+    );
+    expect(removeBotMention("Ask <@U456OTHER> and <@U123BOT> to review this", "U123BOT")).toBe(
+      "Ask <@U456OTHER> and  to review this",
+    );
+    expect(removeBotMention("<@U123BOT> stop")).toBe("<@U123BOT> stop");
   });
 
   it("removes only a leading mention addressed to this bot", () => {

@@ -475,7 +475,7 @@ export function createSlackApp(config: BridgeConfig, dependencies: SlackAppDepen
   });
   const policy = authorizationPolicy(config);
 
-  app.event("app_mention", async ({ body, client, event }) => {
+  app.event("app_mention", async ({ body, client, context, event }) => {
     const bodyMetadata = parseEventMetadata(body);
     if (isEditedMessageEvent(event)) {
       dependencies.logger.debug(
@@ -555,7 +555,7 @@ export function createSlackApp(config: BridgeConfig, dependencies: SlackAppDepen
     try {
       const images = parseSlackImages(content.files ?? []);
       downloaded = await downloadSlackImages(images, config.botToken);
-      const requestText = removeBotMention(content.text);
+      const requestText = removeBotMention(content.text, context.botUserId);
       const slackContext = await threadContextForMessage({
         allowedChannelIds: config.allowedChannelIds,
         channelId: identity.channelId,

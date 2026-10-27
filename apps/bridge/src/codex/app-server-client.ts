@@ -93,6 +93,7 @@ export class ProcessAppServerConnection implements AppServerConnection {
   readonly #reader: readline.Interface;
   #requestHandler: AppServerRequestHandler | undefined;
   #closed = false;
+  #closing: Promise<void> | undefined;
   #nextRequestId = 1;
   #runtimeInfo: AppServerRuntimeInfo = { initializationObserved: false };
 
@@ -111,6 +112,9 @@ export class ProcessAppServerConnection implements AppServerConnection {
       if (message.length > 0) {
         options.onStderr?.(message);
       }
+    });
+    child.stdin.on("error", (error) => {
+      this.#fail(error);
     });
     child.once("error", (error) => {
       this.#fail(error);
@@ -200,13 +204,20 @@ export class ProcessAppServerConnection implements AppServerConnection {
     }
   }
 
-  async close(): Promise<void> {
-    if (this.#closed) {
-      return;
-    }
+  close(): Promise<void> {
+    if (this.#closing !== undefined) return this.#closing;
     this.#closed = true;
     this.#reader.close();
     this.#rejectPending(new Error("Codex app-server connection closed"));
+    this.#closing = this.#terminateChild().finally(() => {
+      this.#child.stdin.destroy();
+      this.#child.stdout.destroy();
+      this.#child.stderr.destroy();
+    });
+    return this.#closing;
+  }
+
+  async #terminateChild(): Promise<void> {
     if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
       return;
     }
@@ -289,6 +300,7 @@ export class ProcessAppServerConnection implements AppServerConnection {
   }
 
   #fail(error: Error): void {
+    if (this.#closed) return;
     this.#closed = true;
     this.#reader.close();
     this.#rejectPending(error);
@@ -298,6 +310,7 @@ export class ProcessAppServerConnection implements AppServerConnection {
         params: { message: error.message },
       });
     }
+    void this.close().catch(() => undefined);
   }
 
   #handleLine(line: string): void {

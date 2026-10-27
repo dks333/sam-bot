@@ -4,3 +4,8 @@ packages:
 allowBuilds:
   better-sqlite3: true
   esbuild: true
+
+overrides:
+  "undici@>=7.0.0 <7.30.1": "7.30.1"
+  "oxfmt>tinypool": "2.1.2"
+  "vite@>=8.0.0 <8.1.6": "8.1.6"

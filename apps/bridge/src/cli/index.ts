@@ -32,6 +32,7 @@ import {
 } from "../config/product.js";
 import { parseArk } from "../validation/parse.js";
 import { codexChildEnvironment } from "../runtime/child-environment.js";
+import { assertSupportedNodeVersion } from "../runtime/node-version.js";
 import { launchAgentPlist } from "./launch-agent.js";
 import {
   activateRelease,
@@ -48,6 +49,7 @@ import {
 import { verifyStagedRuntime } from "./release-smoke.js";
 import { launchedRuntimePid, waitForReleaseReadiness } from "./release-readiness.js";
 import { recoverFailedActivation } from "./release-recovery.js";
+import { secretQuestion } from "./secret-question.js";
 
 const cliInputType = type({
   command: "'setup' | 'doctor' | 'run' | 'service' | 'logs' | 'agent' | 'help'",
@@ -90,6 +92,7 @@ async function question(
   fallback: string | undefined,
   arguments_: string[],
   flag: string,
+  secret = false,
 ): Promise<string> {
   const supplied = flagValue(arguments_, flag);
   if (supplied !== undefined) {
@@ -101,6 +104,7 @@ async function question(
     }
     return fallback;
   }
+  if (secret) return secretQuestion(prompt, fallback);
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const suffix = fallback === undefined || fallback.length === 0 ? "" : ` [${fallback}]`;
@@ -126,16 +130,13 @@ function ensureDirectories(): void {
 }
 
 async function setup(arguments_: string[]): Promise<void> {
+  assertSupportedNodeVersion();
   const savedConfig = existsSync(paths.configFile) ? readProductConfig(paths) : undefined;
   const agentProvider = parseArk(
     type("'codex' | 'claude'"),
     flagValue(arguments_, "--agent") ?? savedConfig?.runtime.agentProvider ?? "codex",
     "agent provider",
   );
-  const [nodeMajor = 0, nodeMinor = 0] = process.versions.node.split(".").map(Number);
-  if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 13)) {
-    fail(`Node ${process.versions.node} is too old; setup requires Node 22.13 or newer.`);
-  }
   if (existsSync(paths.configFile) && !arguments_.includes("--force")) {
     fail(`${paths.configFile} already exists. Use --force to replace it.`);
   }
@@ -210,12 +211,14 @@ async function setup(arguments_: string[]): Promise<void> {
     imported.SLACK_BOT_TOKEN,
     arguments_,
     "--bot-token",
+    true,
   );
   const appToken = await question(
     "Slack app-level token",
     imported.SLACK_APP_TOKEN,
     arguments_,
     "--app-token",
+    true,
   );
   if (!arguments_.includes("--skip-connectivity-check")) {
     const auth = await new WebClient(botToken).auth.test();
@@ -312,15 +315,16 @@ function check(name: string, operation: () => string): DoctorCheck {
 
 async function doctor(): Promise<void> {
   const checks: DoctorCheck[] = [];
-  checks.push(
-    check("Node.js", () => {
-      const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
-      if (major < 22 || (major === 22 && minor < 13)) {
-        fail(`Node ${process.versions.node} is too old; 22.13+ is required`);
-      }
-      return process.versions.node;
-    }),
-  );
+  const nodeCheck = check("Node.js", () => {
+    assertSupportedNodeVersion();
+    return process.versions.node;
+  });
+  checks.push(nodeCheck);
+  if (!nodeCheck.passed) {
+    print(`✗ ${nodeCheck.name}: ${nodeCheck.detail}`);
+    process.exitCode = 1;
+    return;
+  }
   let product: ReturnType<typeof loadProduct> | undefined;
   checks.push(
     check("Configuration", () => {
@@ -903,6 +907,8 @@ pnpm sam-bot logs
 async function main(): Promise<void> {
   const [command = "help", ...rest] = process.argv.slice(2);
   const input = parseArk(cliInputType, { command, rest }, "CLI arguments");
+  if (input.command === "run" || input.command === "service" || input.command === "agent")
+    assertSupportedNodeVersion();
   switch (input.command) {
     case "setup":
       await setup(input.rest);

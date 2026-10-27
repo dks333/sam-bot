@@ -47,7 +47,7 @@ Choose either Codex or Claude Code.
 
 | Requirement   | Details                                                                  |
 | ------------- | ------------------------------------------------------------------------ |
-| Node and pnpm | Node 22.13+, pnpm 11.9.0                                                 |
+| Node and pnpm | Node 22.14+ in the 22.x line or Node 23.6+, pnpm 11.9.0                  |
 | Slack         | Permission to install an app, plus bot and Socket Mode tokens            |
 | Codex         | A local Codex sign-in                                                    |
 | Claude Code   | Version 2.1.306+ within 2.1; local Pro, Max, Team, or Enterprise sign-in |

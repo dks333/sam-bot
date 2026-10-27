@@ -10,7 +10,7 @@ I built Sam Bot to talk to my coding agent from Slack.
 
 It connects to Codex or Claude Code on your computer. You keep your existing account, project setup, and native settings. Send a task in a DM or mention, answer the agent's questions, and get the final response in the thread.
 
-Follow-ups steer Codex while it works. Claude follow-ups wait for the current turn. When the agent asks for permission, you can approve or deny the action in Slack.
+Follow-ups steer Codex while it works. Claude follow-ups wait for the current turn. You can approve or deny supported native permission requests in Slack.
 
 Your computer needs to stay online. Tools run there; model requests still go to the agent's provider.
 

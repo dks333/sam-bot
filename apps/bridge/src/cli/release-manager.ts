@@ -329,6 +329,9 @@ function addNativeRuntimeActivity(
     activity.activeRuns += count("native_deliveries", "state IN ('dispatching','running')");
     activity.queuedTasks += count("native_deliveries", "state='queued'");
     let pendingDelivery = "final_text IS NOT NULL AND delivery_message_ts IS NULL";
+    const deliveryColumns = database.prepare("PRAGMA table_info(native_deliveries)").all();
+    if (deliveryColumns.some((column) => isRecord(column) && column.name === "revoked_at"))
+      pendingDelivery += " AND revoked_at IS NULL";
     if (inactiveProvider && hasTable("native_final_delivery_intents"))
       pendingDelivery += ` AND NOT (
         state='failed' AND completion_status IS 'failed'

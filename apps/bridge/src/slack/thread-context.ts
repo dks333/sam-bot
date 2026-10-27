@@ -1,6 +1,7 @@
 import { isSlackChannelAllowed } from "./channel-policy.js";
 
 const maximumThreadMessages = 100;
+const maximumThreadPages = 10;
 const maximumThreadContextCharacters = 12_000;
 const maximumTextFragments = 80;
 const maximumNestedDepth = 8;
@@ -32,6 +33,7 @@ const linkKeys = new Set([
 
 interface SlackRepliesInput {
   channel: string;
+  cursor?: string;
   limit: number;
   ts: string;
 }
@@ -223,6 +225,85 @@ function messagesFromResponse(response: unknown): unknown[] {
   return response.messages;
 }
 
+async function loadThreadMessages(
+  input: SlackThreadContextInput,
+  reference: SlackThreadReference,
+): Promise<{ messages: unknown[]; notices: string[] }> {
+  const recent: unknown[] = [];
+  const seenMessages = new Set<string>();
+  const cursors = new Set<string>();
+  const notices: string[] = [];
+  let parent: unknown;
+  let cursor: string | undefined;
+  let omitted = false;
+  let incomplete = false;
+  for (let page = 0; page < maximumThreadPages; page += 1) {
+    let response: unknown;
+    try {
+      response = await input.fetchReplies({
+        channel: reference.channelId,
+        limit: maximumThreadMessages,
+        ts: reference.threadTs,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+    } catch (error) {
+      if (page === 0) throw error;
+      incomplete = true;
+      break;
+    }
+    if (!isRecord(response) || !Array.isArray(response.messages)) {
+      incomplete = true;
+      break;
+    }
+    for (const message of messagesFromResponse(response)) {
+      if (!isRecord(message)) continue;
+      const timestamp = stringField(message, "ts");
+      if (timestamp !== undefined) {
+        if (
+          timestamp === input.currentMessageTs ||
+          isAfterCurrentMessage(timestamp, input.currentMessageTs) ||
+          seenMessages.has(timestamp)
+        )
+          continue;
+        seenMessages.add(timestamp);
+      }
+      if (timestamp === reference.threadTs) {
+        parent = message;
+        continue;
+      }
+      recent.push(message);
+      if (recent.length > maximumThreadMessages - 1) {
+        recent.shift();
+        omitted = true;
+      }
+    }
+    const metadata = response.response_metadata;
+    const next = isRecord(metadata) ? metadata.next_cursor : undefined;
+    if (next !== undefined && typeof next !== "string") {
+      incomplete = true;
+      break;
+    }
+    if (typeof next !== "string" || next.length === 0) {
+      incomplete = response.has_more === true;
+      break;
+    }
+    if (cursors.has(next) || page === maximumThreadPages - 1) {
+      incomplete = true;
+      break;
+    }
+    cursors.add(next);
+    cursor = next;
+  }
+  if (omitted)
+    notices.push("[Earlier Slack replies omitted; only the recent loaded replies are included]");
+  if (incomplete)
+    notices.push(
+      "[Slack thread history is incomplete; additional replies, including newer messages, may be missing]",
+    );
+  if (parent === undefined) return { messages: recent, notices };
+  return { messages: [parent, ...recent], notices };
+}
+
 function isAfterCurrentMessage(messageTs: string, currentMessageTs: string): boolean {
   const messageTime = Number(messageTs);
   const currentMessageTime = Number(currentMessageTs);
@@ -265,8 +346,8 @@ function truncateContext(context: string): string {
   if (context.length <= maximumThreadContextCharacters) {
     return context;
   }
-  const suffix = "\n[Slack thread context truncated]";
-  return `${context.slice(0, maximumThreadContextCharacters - suffix.length).trimEnd()}${suffix}`;
+  const prefix = "[Slack thread context truncated; earlier context omitted]\n";
+  return `${prefix}${context.slice(-(maximumThreadContextCharacters - prefix.length)).trimStart()}`;
 }
 
 export async function loadSlackThreadContext(
@@ -275,17 +356,16 @@ export async function loadSlackThreadContext(
   if (input.threadTs === input.currentMessageTs) {
     return undefined;
   }
-  const response = await input.fetchReplies({
-    channel: input.channelId,
-    limit: maximumThreadMessages,
-    ts: input.threadTs,
+  const outer = await loadThreadMessages(input, {
+    channelId: input.channelId,
+    threadTs: input.threadTs,
   });
   const outerThread = formatThreadMessages(
-    messagesFromResponse(response),
+    outer.messages,
     input.currentMessageTs,
     input.currentMessageTs,
   );
-  const formatted = [...outerThread.messages];
+  const forwarded: string[] = [];
   for (const reference of outerThread.forwardedThreads) {
     // A forwarded link can point at replies hidden from the destination channel, so cross-channel
     // hydration must stay inside the same channel policy as normal bot requests.
@@ -293,32 +373,26 @@ export async function loadSlackThreadContext(
       reference.channelId !== input.channelId &&
       !isSlackChannelAllowed(input.allowedChannelIds, reference.channelId)
     ) {
-      formatted.push(
+      forwarded.push(
         `[Forwarded Slack thread ${reference.channelId} at ${reference.threadTs} was not loaded because its source channel is not allowlisted]`,
       );
       continue;
     }
     try {
-      const forwardedResponse = await input.fetchReplies({
-        channel: reference.channelId,
-        limit: maximumThreadMessages,
-        ts: reference.threadTs,
-      });
-      const forwardedThread = formatThreadMessages(
-        messagesFromResponse(forwardedResponse),
-        input.currentMessageTs,
-      );
-      if (forwardedThread.messages.length > 0) {
-        formatted.push(
-          `Forwarded Slack thread ${reference.channelId} at ${reference.threadTs}:\n${forwardedThread.messages.join("\n\n")}`,
+      const loaded = await loadThreadMessages(input, reference);
+      const forwardedThread = formatThreadMessages(loaded.messages, input.currentMessageTs);
+      if (forwardedThread.messages.length > 0 || loaded.notices.length > 0) {
+        forwarded.push(
+          `Forwarded Slack thread ${reference.channelId} at ${reference.threadTs}:\n${[...forwardedThread.messages, ...loaded.notices].join("\n\n")}`,
         );
       }
     } catch (error) {
       input.onForwardedThreadError?.(reference, error);
-      formatted.push(
+      forwarded.push(
         `[Forwarded Slack thread ${reference.channelId} at ${reference.threadTs} could not be read by the Slack bot]`,
       );
     }
   }
+  const formatted = [...forwarded, ...outerThread.messages, ...outer.notices];
   return formatted.length === 0 ? undefined : truncateContext(formatted.join("\n\n"));
 }

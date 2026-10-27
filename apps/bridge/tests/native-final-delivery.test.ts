@@ -30,6 +30,7 @@ function setup(
   text = "The synthetic final result",
   progressReceipt?: string,
   completionStatus: NativeCompletionStatus = "completed",
+  completeImmediately = true,
 ) {
   const directory = mkdtempSync(path.join(tmpdir(), "native-final-delivery-"));
   directories.push(directory);
@@ -50,7 +51,7 @@ function setup(
   store.dispatch(current.eventId);
   store.started(current.eventId, "synthetic-native-turn");
   if (progressReceipt !== undefined) store.setProgressReceipt(current.eventId, progressReceipt);
-  store.complete(current.eventId, text, completionStatus);
+  if (completeImmediately) store.complete(current.eventId, text, completionStatus);
   const postFinal = vi.fn(async () => "2.1");
   const update = vi.fn(async () => {});
   const reconcile = vi.fn(async (): Promise<NativeFinalReconciliation> => ({ status: "unknown" }));
@@ -81,6 +82,48 @@ function setup(
 }
 
 describe("NativeFinalDelivery", () => {
+  it("never sends or reconciles a revoked final", async () => {
+    const harness = setup();
+    harness.store.prepareFinalParts(harness.current.eventId, ["The synthetic final result"]);
+    harness.store.beginFinalPart(harness.current.eventId, 0);
+    harness.store.revokeUnauthorized(() => false);
+    await harness.delivery.deliver(harness.current.eventId);
+    expect(harness.postFinal).not.toHaveBeenCalled();
+    expect(harness.update).not.toHaveBeenCalled();
+    expect(harness.reconcile).not.toHaveBeenCalled();
+    expect(harness.setMessageStatus).not.toHaveBeenCalled();
+    expect(harness.store.getFinalParts(harness.current.eventId)[0]?.state).toBe("sending");
+  });
+
+  it("does not publish reactions or propagate receipts to a revoked linked follow-up", async () => {
+    const harness = setup("The synthetic final result", undefined, "completed", false);
+    const follower = harness.store.claim({
+      eventId: "synthetic-revoked-follower",
+      teamId: harness.current.teamId,
+      userId: harness.current.userId,
+      channelId: harness.current.channelId,
+      threadTs: harness.current.threadTs,
+      messageTs: "1.2",
+      text: "Synthetic linked follow-up",
+    });
+    if (follower === undefined) throw new Error("Expected synthetic follower");
+    harness.store.steering(follower.eventId, "synthetic-native-turn");
+    harness.store.steered(follower.eventId, "synthetic-native-turn");
+    harness.store.linkFollowup(follower.eventId, harness.current.eventId);
+    harness.store.complete(harness.current.eventId, "The synthetic final result", "completed");
+    harness.store.revokeUnauthorized((entry) => entry.eventId !== follower.eventId);
+    await harness.delivery.deliver(harness.current.eventId);
+    expect(harness.postFinal).toHaveBeenCalledTimes(1);
+    expect(harness.setMessageStatus).toHaveBeenCalledTimes(1);
+    expect(harness.setMessageStatus).toHaveBeenCalledWith(
+      { channelId: harness.current.channelId, messageTs: harness.current.messageTs },
+      "completed",
+      "working",
+    );
+    expect(harness.store.getDelivery(follower.eventId)?.deliveryMessageTs).toBeUndefined();
+    expect(harness.store.getDelivery(follower.eventId)?.revokedAt).toBeDefined();
+  });
+
   it("posts a separate final with a durable send intent and saves the actual receipt", async () => {
     const harness = setup();
     harness.postFinal.mockImplementationOnce(async () => {
